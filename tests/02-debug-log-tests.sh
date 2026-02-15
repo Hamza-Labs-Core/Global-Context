@@ -122,7 +122,6 @@ echo "=== T-3: Log entry contains timestamp and event type ==="
   else
     echo "  FAIL: log file not found"
     _record_fail
-    _record_fail
   fi
 )
 

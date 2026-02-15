@@ -12,6 +12,8 @@ set -euo pipefail
 # Usage: bash src/install-hooks.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve GC_BASE inline (not via paths.sh) because at install-time
+# paths.sh may not yet be deployed to the target store.
 GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 
 echo "GlobalContext Hook Integration -- Installer"

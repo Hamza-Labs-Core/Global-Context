@@ -6,7 +6,7 @@
       "event_type": "SessionStarted",
       "async": false,
       "timeout": 5000,
-      "matcher": null
+      "matcher": ""
     },
     "UserPromptSubmit": {
       "event_type": "UserPromptReceived",

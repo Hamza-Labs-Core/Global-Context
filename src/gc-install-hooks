@@ -13,7 +13,8 @@ HOOK_IDENTIFIER="gc-hook"
 GC_HOOK_PATH="~/.claude-context/bin/gc-hook"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Resolve GC_BASE from CLAUDE_CONTEXT_PATH or default
+# Resolve GC_BASE inline (not via paths.sh) because at install-time
+# paths.sh may not yet be deployed to the target store.
 GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 
 # Resolve settings directory (uses HOME, can be overridden for testing)
@@ -98,7 +99,7 @@ cmd_install() {
 
     # Build the hook entry (always include async field)
     local hook_entry
-    if [ "$matcher_val" != "null" ] && [ -n "$matcher_val" ]; then
+    if [ "$matcher_val" != "null" ]; then
       hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" --argjson async "$async_val" \
         '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher, async: $async}')
     else
