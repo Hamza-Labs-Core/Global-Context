@@ -49,9 +49,16 @@ assert_eq "spaces stripped" "hasspaces" "$result"
 result="$(gc_sanitize_session_id "../../../etc/passwd")"
 assert_eq "path traversal: ../../../etc/passwd" "etcpasswd" "$result"
 
-# 6. Empty string falls back to "unknown"
+# 6. Empty string falls back to "unknown-{uuid}"
 result="$(gc_sanitize_session_id "")"
-assert_eq "empty string -> unknown" "unknown" "$result"
+if [[ "$result" =~ ^unknown-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  PASS=$((PASS + 1))
+  printf "  PASS: %s\n" "empty string -> unknown-{uuid}"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL: %s\n" "empty string -> unknown-{uuid}"
+  printf "    actual:   '%s'\n" "$result"
+fi
 
 # 7. Hidden file dot stripped
 result="$(gc_sanitize_session_id ".hidden")"
@@ -74,9 +81,16 @@ assert_eq "dots stripped: with.dots.inside" "withdotsinside" "$result"
 result="$(gc_sanitize_session_id "under_score")"
 assert_eq "underscores allowed: under_score" "under_score" "$result"
 
-# 12. Only disallowed characters -> unknown
+# 12. Only disallowed characters -> unknown-{uuid}
 result="$(gc_sanitize_session_id "...")"
-assert_eq "all dots -> unknown" "unknown" "$result"
+if [[ "$result" =~ ^unknown-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  PASS=$((PASS + 1))
+  printf "  PASS: %s\n" "all dots -> unknown-{uuid}"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL: %s\n" "all dots -> unknown-{uuid}"
+  printf "    actual:   '%s'\n" "$result"
+fi
 
 # 13. Mixed valid and invalid characters
 result="$(gc_sanitize_session_id "a!@#b\$%^c")"
@@ -95,9 +109,16 @@ result1="$(gc_sanitize_session_id "test-input")"
 result2="$(gc_sanitize_session_id "test-input")"
 assert_eq "determinism: identical results" "$result1" "$result2"
 
-# 17. No argument at all -> unknown
+# 17. No argument at all -> unknown-{uuid}
 result="$(gc_sanitize_session_id)"
-assert_eq "no argument -> unknown" "unknown" "$result"
+if [[ "$result" =~ ^unknown-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  PASS=$((PASS + 1))
+  printf "  PASS: %s\n" "no argument -> unknown-{uuid}"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL: %s\n" "no argument -> unknown-{uuid}"
+  printf "    actual:   '%s'\n" "$result"
+fi
 
 printf "\n=== Results: %d passed, %d failed ===\n" "$PASS" "$FAIL"
 

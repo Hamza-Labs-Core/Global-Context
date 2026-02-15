@@ -180,12 +180,20 @@ expected_dir7="$GC_EVENTS_DIR/proj-abc123/etcpasswd"
 assert_eq "path traversal sanitized" "$expected_dir7" "$result7"
 assert_dir_exists "sanitized path traversal dir exists" "$result7"
 
-printf "\n%s\n" "-- Test 8: Empty session ID falls back to unknown --"
+printf "\n%s\n" "-- Test 8: Empty session ID falls back to unknown-{uuid} --"
 
 result8="$(gc_ensure_session_dir "proj-abc123" "")"
-expected_dir8="$GC_EVENTS_DIR/proj-abc123/unknown"
+# Extract the basename of the returned directory
+result8_basename="$(basename "$result8")"
 
-assert_eq "empty session ID -> unknown" "$expected_dir8" "$result8"
+if [[ "$result8_basename" =~ ^unknown-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  PASS=$((PASS + 1))
+  printf "  PASS: %s\n" "empty session ID -> unknown-{uuid}"
+else
+  FAIL=$((FAIL + 1))
+  printf "  FAIL: %s\n" "empty session ID -> unknown-{uuid}"
+  printf "    actual basename: '%s'\n" "$result8_basename"
+fi
 assert_dir_exists "unknown directory exists" "$result8"
 assert_file_exists "unknown .lock exists" "$result8/.lock"
 
