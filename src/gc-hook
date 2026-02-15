@@ -3,9 +3,10 @@
 # Usage: gc-hook <EventType>
 # Called by Claude Code hooks. Reads JSON from stdin, passes to capture-event.
 # GUARANTEES: exit 0, zero stdout, zero stderr.
-set -euo pipefail
+# NOTE: intentionally no set -euo pipefail here -- the exit-0 guarantee
+# takes priority. If $1 is missing we still must exit 0.
 
-EVENT_TYPE="${1:?Missing event type}"
+EVENT_TYPE="${1:-UnknownEvent}"
 
 # Resolve storage path: CLAUDE_CONTEXT_PATH env var, or default
 GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"

@@ -42,60 +42,6 @@ info() {
   echo "$*"
 }
 
-# Build the jq filter that generates all hook entries from hook-config.json
-# Returns a jq program that transforms settings.json
-build_merge_filter() {
-  local config_file="$1"
-
-  # Read hook names from config
-  local hook_names
-  hook_names=$(jq -r '.hooks | keys[]' "$config_file")
-
-  local jq_program="."
-
-  for hook_name in $hook_names; do
-    local event_type async_val timeout_val matcher_val
-    event_type=$(jq -r ".hooks[\"$hook_name\"].event_type" "$config_file")
-    async_val=$(jq -r ".hooks[\"$hook_name\"].async" "$config_file")
-    timeout_val=$(jq -r ".hooks[\"$hook_name\"].timeout" "$config_file")
-    matcher_val=$(jq -r ".hooks[\"$hook_name\"].matcher // empty" "$config_file")
-
-    # Build the command string
-    local command_str="${GC_HOOK_PATH} ${event_type}"
-
-    # Build the hook entry as JSON
-    local hook_entry
-    if [ "$async_val" = "true" ]; then
-      if [ -n "$matcher_val" ]; then
-        hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" \
-          '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher}')
-      else
-        hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" \
-          '{type: "command", command: $cmd, timeout: $timeout}')
-      fi
-    else
-      if [ -n "$matcher_val" ]; then
-        hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" \
-          '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher}')
-      else
-        hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" \
-          '{type: "command", command: $cmd, timeout: $timeout}')
-      fi
-    fi
-
-    # Build the jq filter for this hook:
-    # 1. Ensure .hooks exists
-    # 2. Remove any existing gc-hook entry from this event's array
-    # 3. Append the new entry
-    jq_program="${jq_program} | .hooks = (.hooks // {})"
-    jq_program="${jq_program} | .hooks[\"$hook_name\"] = ([(.hooks[\"$hook_name\"] // [])[] | select(.command | contains(\"$HOOK_IDENTIFIER\") | not)] + [$hook_entry_var])"
-
-    # Actually we'll do this a simpler way - accumulate all entries
-  done
-
-  echo "$jq_program"
-}
-
 # ---------------------------------------------------------------------------
 # install subcommand
 # ---------------------------------------------------------------------------
@@ -150,14 +96,14 @@ cmd_install() {
     # Build the command string
     local command_str="${GC_HOOK_PATH} ${event_type}"
 
-    # Build the hook entry
+    # Build the hook entry (always include async field)
     local hook_entry
     if [ "$matcher_val" != "null" ] && [ -n "$matcher_val" ]; then
-      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" \
-        '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher}')
+      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" --argjson async "$async_val" \
+        '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher, async: $async}')
     else
-      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" \
-        '{type: "command", command: $cmd, timeout: $timeout}')
+      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --argjson async "$async_val" \
+        '{type: "command", command: $cmd, timeout: $timeout, async: $async}')
     fi
 
     # Merge: remove old gc-hook entries, append new one
@@ -277,6 +223,30 @@ cmd_validate() {
 
     if [ "$actual_timeout" != "$HOOK_TIMEOUT" ]; then
       echo "FAIL: $hook_name -- timeout is $actual_timeout, expected $HOOK_TIMEOUT"
+      all_pass=false
+      continue
+    fi
+
+    # Verify async field matches config
+    local expected_async actual_async
+    expected_async=$(jq -r ".hooks[\"$hook_name\"].async" "$HOOK_CONFIG")
+    actual_async=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
+      '[.hooks[$hook_name][] | select(.command | contains($identifier))][0].async' "$CLAUDE_SETTINGS_FILE")
+
+    if [ "$actual_async" != "$expected_async" ]; then
+      echo "FAIL: $hook_name -- async is $actual_async, expected $expected_async"
+      all_pass=false
+      continue
+    fi
+
+    # Verify matcher field matches config
+    local expected_matcher actual_matcher
+    expected_matcher=$(jq -r ".hooks[\"$hook_name\"].matcher" "$HOOK_CONFIG")
+    actual_matcher=$(jq -r --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
+      '[.hooks[$hook_name][] | select(.command | contains($identifier))][0].matcher // "null"' "$CLAUDE_SETTINGS_FILE")
+
+    if [ "$expected_matcher" != "$actual_matcher" ]; then
+      echo "FAIL: $hook_name -- matcher is '$actual_matcher', expected '$expected_matcher'"
       all_pass=false
       continue
     fi

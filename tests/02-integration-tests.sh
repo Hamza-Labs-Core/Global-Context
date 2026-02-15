@@ -283,6 +283,37 @@ echo "=== T-16: Aborts if capture-event missing ==="
 
 # ===================================================================
 echo ""
+echo "=== T-17: Aborts if jq is missing ==="
+# ===================================================================
+(
+  tmpdir=$(setup_env)
+  # Create a minimal PATH that excludes jq
+  restricted_path="$tmpdir/restricted-bin"
+  mkdir -p "$restricted_path"
+  # Symlink just bash so the script can run
+  ln -s "$(command -v bash)" "$restricted_path/bash"
+  ln -s "$(command -v env)" "$restricted_path/env" 2>/dev/null || true
+  # Copy essential utilities the script needs (but NOT jq)
+  for cmd in mkdir cp cat date stat chmod; do
+    local_cmd=$(command -v "$cmd" 2>/dev/null || true)
+    if [ -n "$local_cmd" ]; then
+      ln -s "$local_cmd" "$restricted_path/$cmd" 2>/dev/null || true
+    fi
+  done
+  exit_code=0
+  PATH="$restricted_path" HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" bash "$GC_INSTALL_HOOKS" install 2>/dev/null || exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    echo "  PASS: aborted when jq is missing"
+    _record_pass
+  else
+    echo "  FAIL: should have aborted when jq is missing"
+    _record_fail
+  fi
+  rm -rf "$tmpdir"
+)
+
+# ===================================================================
+echo ""
 echo "=== T-18: Validate detects missing hooks ==="
 # ===================================================================
 (
