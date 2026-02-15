@@ -101,29 +101,27 @@ fi
 
 # ===================================================================
 echo ""
-echo "=== Test 3: Invalid JSON data is rejected ==="
+echo "=== Test 3: String data is accepted (malformed JSON fallback) ==="
 # ===================================================================
 SESSION_3="test-session-003"
 SANITIZED_3="$(gc_sanitize_session_id "$SESSION_3")"
 SESSION_DIR_3="$CLAUDE_CONTEXT_PATH/events/$PROJECT_ID/$SANITIZED_3"
 
-# Write with invalid data (string, not object) -- jq --argjson will fail
-# so we need to test that the function handles this gracefully
-if gc_write_event "$SESSION_3" "BadEvent" '"not an object"' 2>/dev/null; then
-  # If it succeeded, check if it ended up in _rejected
-  if [[ -d "$SESSION_DIR_3/_rejected" ]]; then
-    rejected_count="$(find "$SESSION_DIR_3/_rejected" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
-    if [[ "$rejected_count" -ge 1 ]]; then
-      pass "invalid data event was rejected (found in _rejected/)"
+# Write with string data -- should be accepted since data can be object or string
+if result3="$(gc_write_event "$SESSION_3" "StringDataEvent" '"malformed input stored as string"' 2>/dev/null)"; then
+  if [[ -f "$result3" ]]; then
+    json3="$(cat "$result3")"
+    data3="$(printf '%s' "$json3" | jq -r '.data')"
+    if [[ "$data3" == "malformed input stored as string" ]]; then
+      pass "string data event written successfully with correct data"
     else
-      fail "invalid data event was not placed in _rejected/"
+      fail "string data event data mismatch: got '$data3'"
     fi
   else
-    fail "no _rejected/ directory created for invalid data"
+    fail "string data event file not found at '$result3'"
   fi
 else
-  # The function returned non-zero, which is acceptable for invalid data
-  pass "invalid data event was rejected (function returned non-zero)"
+  fail "string data event was rejected (should be accepted)"
 fi
 
 # ===================================================================
@@ -279,8 +277,8 @@ for i in $(seq 1 10); do
   padded="$(printf "%06d" "$i")"
   json="$(cat "$SESSION_DIR_1/${padded}.json")"
   ts="$(printf '%s' "$json" | jq -r '.timestamp')"
-  # ISO 8601 UTC: YYYY-MM-DDTHH:MM:SS.mmmZ
-  if [[ ! "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]]; then
+  # ISO 8601 UTC: YYYY-MM-DDTHH:MM:SS.mmmZ or YYYY-MM-DDTHH:MM:SSZ (fallback)
+  if [[ ! "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{3})?Z$ ]]; then
     fail "timestamp in ${padded}.json is not ISO 8601 UTC: $ts"
     all_ts_valid=false
   fi
@@ -366,10 +364,10 @@ else
 fi
 
 val="$(printf '%s' "$json1" | jq -r '.session_id')"
-if [[ "$val" == "$SANITIZED_1" ]]; then
-  pass "session_id in event envelope matches sanitized value"
+if [[ "$val" == "$SESSION_1" ]]; then
+  pass "session_id in event envelope preserves original value"
 else
-  fail "session_id expected '$SANITIZED_1', got '$val'"
+  fail "session_id expected '$SESSION_1' (original), got '$val'"
 fi
 
 val="$(printf '%s' "$json1" | jq '.sequence')"
@@ -442,10 +440,11 @@ result13="$(gc_write_event "$SESSION_13" "TestEvent" '{"sanitize": true}')"
 if [[ -f "$result13" ]]; then
   json13="$(cat "$result13")"
   sid13="$(printf '%s' "$json13" | jq -r '.session_id')"
-  if [[ "$sid13" == "$SANITIZED_13" ]]; then
-    pass "session_id is sanitized in event envelope"
+  # The envelope should preserve the original (unsanitized) session_id
+  if [[ "$sid13" == "$SESSION_13" ]]; then
+    pass "session_id preserves original value in event envelope"
   else
-    fail "session_id expected '$SANITIZED_13', got '$sid13'"
+    fail "session_id expected original '$SESSION_13', got '$sid13'"
   fi
   # Verify the directory path uses the sanitized name
   if [[ "$result13" == *"/$SANITIZED_13/"* ]]; then

@@ -93,11 +93,12 @@ gc_validate_event_json() {
     return 1
   fi
 
-  # Step 5: Verify data is an object (not null, not a string, not an array, etc.)
+  # Step 5: Verify data is an object or string (not null, not an array, not a number, etc.)
+  # String is allowed for malformed JSON input that gets stored as raw text.
   local data_type
   data_type=$(echo "$json_string" | jq -r '.data | type')
-  if [ "$data_type" != "object" ]; then
-    echo "gc_validate_event_json: 'data' must be an object, got $data_type" >&2
+  if [ "$data_type" != "object" ] && [ "$data_type" != "string" ]; then
+    echo "gc_validate_event_json: 'data' must be an object or string, got $data_type" >&2
     return 1
   fi
 

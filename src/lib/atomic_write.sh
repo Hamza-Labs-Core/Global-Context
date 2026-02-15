@@ -68,6 +68,9 @@ gc_atomic_write() {
     return 1
   fi
 
+  # Set restrictive permissions (owner read/write only)
+  chmod 600 "$target_path" 2>/dev/null || true
+
   return 0
 }
 

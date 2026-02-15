@@ -136,7 +136,7 @@ else
   pass "empty input rejected by gc_validate_json"
 fi
 
-echo "Test 9: gc_validate_event_json rejects data as string"
+echo "Test 9: gc_validate_event_json accepts data as string (malformed JSON fallback)"
 STRING_DATA='{
   "event_id": "abc-123",
   "event_type": "context.created",
@@ -147,9 +147,9 @@ STRING_DATA='{
   "data": "not_an_object"
 }'
 if gc_validate_event_json "$STRING_DATA" 2>/dev/null; then
-  fail "data as string accepted (should have been rejected)"
+  pass "data as string accepted (malformed JSON fallback)"
 else
-  pass "data as string rejected"
+  fail "data as string rejected (should be accepted for malformed JSON)"
 fi
 
 echo "Test 10: gc_validate_event_json rejects empty timestamp"
