@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# GlobalContext store initialization (plugin version)
+# Creates directory structure at $GC_ROOT
+# Idempotent: safe to run multiple times
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$PLUGIN_ROOT/lib/paths.sh" 2>/dev/null || {
+  GC_ROOT="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+}
+
+# Create directory structure
+mkdir -p "$GC_ROOT/events" 2>/dev/null
+mkdir -p "$GC_ROOT/projections" 2>/dev/null
+mkdir -p "$GC_ROOT/logs" 2>/dev/null
+chmod 700 "$GC_ROOT" 2>/dev/null
+
+# Create config.json if missing
+if [ ! -f "$GC_ROOT/config.json" ]; then
+  cat > "$GC_ROOT/config.json" <<CONF
+{
+  "version": "1.0.0",
+  "events_dir": "events",
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "source": "plugin"
+}
+CONF
+fi
+
+exit 0
