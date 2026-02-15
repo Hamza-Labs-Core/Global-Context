@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# GlobalContext hook wrapper v1
+# Usage: gc-hook <EventType>
+# Called by Claude Code hooks. Reads JSON from stdin, passes to capture-event.
+# GUARANTEES: exit 0, zero stdout, zero stderr.
+# NOTE: intentionally no set -euo pipefail here -- the exit-0 guarantee
+# takes priority. If $1 is missing we still must exit 0.
+
+EVENT_TYPE="${1:-UnknownEvent}"
+
+# Resolve storage path: CLAUDE_CONTEXT_PATH env var, or default
+GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+
+# Debug logging support (GC_DEBUG=1 enables)
+if [ "${GC_DEBUG:-0}" = "1" ]; then
+  # Source debug helper if available; fail silently if not
+  source "$GC_BASE/lib/debug_log.sh" 2>/dev/null || true
+  if type gc_debug_log &>/dev/null; then
+    gc_debug_log "gc-hook invoked: event_type=$EVENT_TYPE"
+    ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") || {
+      gc_debug_log "capture-event failed: exit=$?"
+      true
+    }
+  else
+    ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>/dev/null) || true
+  fi
+else
+  # Run capture-event in a subshell to isolate all side effects.
+  # - stdin is piped through from Claude Code
+  # - stdout is suppressed (no output that Claude Code could interpret)
+  # - stderr is suppressed (no error leaks)
+  # - exit code is ignored (|| true)
+  ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>/dev/null) || true
+fi
+
+exit 0
