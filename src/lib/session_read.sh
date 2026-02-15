@@ -9,6 +9,35 @@ _SESSION_READ_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=paths.sh
 source "${_SESSION_READ_DIR}/paths.sh"
 
+# _gc_date_to_epoch(date_string)
+#
+# Portable date-to-epoch conversion. Tries GNU date, then macOS date, then python3.
+# Outputs epoch seconds to stdout. Returns 0 on failure.
+_gc_date_to_epoch() {
+  local date_str="$1"
+  local epoch
+
+  # Try GNU date -d
+  epoch="$(date -d "$date_str" +%s 2>/dev/null)" && { printf '%s' "$epoch"; return; }
+
+  # Try macOS/BSD date -j -f (ISO 8601 format)
+  epoch="$(date -j -f "%Y-%m-%dT%H:%M:%S" "${date_str%%.*}" +%s 2>/dev/null)" && { printf '%s' "$epoch"; return; }
+  epoch="$(date -j -f "%Y-%m-%d %H:%M:%S" "${date_str%%.*}" +%s 2>/dev/null)" && { printf '%s' "$epoch"; return; }
+
+  # Fallback to python3
+  epoch="$(python3 -c "
+import sys, datetime
+try:
+    s = sys.argv[1].replace('Z','+00:00')
+    dt = datetime.datetime.fromisoformat(s)
+    print(int(dt.timestamp()))
+except Exception:
+    print(0)
+" "$date_str" 2>/dev/null)" && { printf '%s' "$epoch"; return; }
+
+  printf '0'
+}
+
 # gc_read_session_with_derived(project_id, session_id)
 #
 # Reads session.json from the session's events directory and adds derived fields:
@@ -58,7 +87,7 @@ gc_read_session_with_derived() {
     last_event_at="$(printf '%s' "$meta" | jq -r '.last_event_at // empty')"
     if [[ -n "$last_event_at" ]]; then
       local last_epoch now_epoch
-      last_epoch="$(date -d "$last_event_at" +%s 2>/dev/null || echo 0)"
+      last_epoch="$(_gc_date_to_epoch "$last_event_at")"
       now_epoch="$(date +%s)"
       local diff=$(( now_epoch - last_epoch ))
       if [[ "$diff" -gt 86400 ]]; then
@@ -82,8 +111,8 @@ gc_read_session_with_derived() {
 
     if [[ -n "$end_time" ]]; then
       local start_epoch end_epoch
-      start_epoch="$(date -d "$started_at" +%s 2>/dev/null || echo 0)"
-      end_epoch="$(date -d "$end_time" +%s 2>/dev/null || echo 0)"
+      start_epoch="$(_gc_date_to_epoch "$started_at")"
+      end_epoch="$(_gc_date_to_epoch "$end_time")"
       if [[ "$start_epoch" -gt 0 && "$end_epoch" -gt 0 ]]; then
         duration_seconds=$(( end_epoch - start_epoch ))
         if [[ "$duration_seconds" -lt 0 ]]; then

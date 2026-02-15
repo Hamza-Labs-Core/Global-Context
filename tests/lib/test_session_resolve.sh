@@ -42,9 +42,9 @@ if [[ "$result" == "abc-123-def" ]]; then pass "Latest via symlink"; else fail "
 echo "Test 2: resolve_latest_session fallback"
 rm -f "$CLAUDE_CONTEXT_PATH/projections/$pid/latest"
 # Set older mtime on abc dirs, newer on xyz
-touch -d "2020-01-01" "$CLAUDE_CONTEXT_PATH/events/$pid/abc-123-def"
-touch -d "2020-01-01" "$CLAUDE_CONTEXT_PATH/events/$pid/abc-456-ghi"
-touch -d "2030-01-01" "$CLAUDE_CONTEXT_PATH/events/$pid/xyz-789" 2>/dev/null || touch "$CLAUDE_CONTEXT_PATH/events/$pid/xyz-789"
+touch -t 202001010000 "$CLAUDE_CONTEXT_PATH/events/$pid/abc-123-def"
+touch -t 202001010000 "$CLAUDE_CONTEXT_PATH/events/$pid/abc-456-ghi"
+touch -t 203001010000 "$CLAUDE_CONTEXT_PATH/events/$pid/xyz-789"
 result2="$(resolve_latest_session "$pid")"
 if [[ "$result2" == "xyz-789" ]]; then pass "Latest fallback to mtime"; else fail "Latest fallback: got $result2"; fi
 
