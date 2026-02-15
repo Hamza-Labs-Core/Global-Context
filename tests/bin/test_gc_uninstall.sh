@@ -180,7 +180,7 @@ echo "=== Test Group 3: Purge without --force requires confirmation ==="
   _do_install "$TEST_TMPDIR"
 
   # Pipe "no" to stdin
-  output=$(echo "no" | bash "$GC_UNINSTALL" --purge 2>&1)
+  output=$(echo "no" | bash "$GC_UNINSTALL" --purge 2>&1) || true
 
   # Nothing should be removed
   assert_dir_exists "store still exists after declining" "$TEST_TMPDIR/gc-store"

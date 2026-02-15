@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# gc-uninstall -- Full system teardown for GlobalContext
-# Removes hooks from settings.json, optionally deletes the store.
+# gc-uninstall -- Uninstall GlobalContext
+# Default: soft uninstall (remove hooks + bin/ + lib/, preserve events/ and config)
+# --purge: full removal (delete entire store)
 #
-# Usage: gc-uninstall [--keep-data] [--force] [--dry-run]
+# Usage: gc-uninstall [--purge] [--force] [--dry-run]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -20,27 +21,30 @@ else
 fi
 
 # Parse flags
-KEEP_DATA=false
+PURGE=false
 FORCE=false
 DRY_RUN=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --keep-data) KEEP_DATA=true ;;
+    --purge)     PURGE=true ;;
     --force)     FORCE=true ;;
     --dry-run)   DRY_RUN=true ;;
+    --keep-data) ;; # accepted for compatibility (soft uninstall is already the default)
     -h|--help)
-      echo "Usage: gc-uninstall [--keep-data] [--force] [--dry-run]"
+      echo "Usage: gc-uninstall [--purge] [--force] [--dry-run]"
+      echo ""
+      echo "Default: soft uninstall (remove hooks, bin/, lib/; preserve events and config)"
       echo ""
       echo "Flags:"
-      echo "  --keep-data  Remove hooks but preserve event data"
-      echo "  --force      Skip confirmation prompt"
-      echo "  --dry-run    Print what would be removed without changes"
+      echo "  --purge    Delete entire store including event data"
+      echo "  --force    Skip confirmation prompt (only relevant with --purge)"
+      echo "  --dry-run  Print what would be removed without changes"
       exit 0
       ;;
     *)
       echo "error: unknown flag: $1" >&2
-      echo "Usage: gc-uninstall [--keep-data] [--force] [--dry-run]" >&2
+      echo "Usage: gc-uninstall [--purge] [--force] [--dry-run]" >&2
       exit 1
       ;;
   esac
@@ -80,26 +84,28 @@ if [ "$DRY_RUN" = true ]; then
   else
     echo "No GlobalContext hooks found in settings.json"
   fi
-  if [ "$KEEP_DATA" = true ]; then
-    echo "Would preserve: $GC_BASE (--keep-data)"
-  elif [ "$store_exists" = true ]; then
+  if [ "$PURGE" = true ] && [ "$store_exists" = true ]; then
     echo "Would delete: $GC_BASE ($file_count files, $store_size)"
+  elif [ "$store_exists" = true ]; then
+    echo "Would remove: bin/ and lib/ from $GC_BASE"
+    echo "Would preserve: events/ and config.json"
   else
     echo "Store not found at $GC_BASE"
   fi
   exit 0
 fi
 
-# Confirmation prompt (unless --force)
-if [ "$FORCE" != true ]; then
-  if [ "$KEEP_DATA" = true ]; then
-    echo "This will remove all GlobalContext hooks from settings.json."
-    echo "Event data at $GC_BASE will be preserved."
-  else
-    echo "This will remove all GlobalContext hooks and data."
-    if [ "$store_exists" = true ]; then
-      echo "Store: $file_count files, $store_size"
-    fi
+# Nothing to uninstall -- early exit
+if [ "$store_exists" = false ] && [ "$hooks_present" = false ]; then
+  echo "GlobalContext is not installed."
+  exit 0
+fi
+
+# Confirmation prompt for --purge (unless --force)
+if [ "$PURGE" = true ] && [ "$FORCE" != true ]; then
+  echo "This will permanently delete all GlobalContext data."
+  if [ "$store_exists" = true ]; then
+    echo "Store: $file_count files, $store_size"
   fi
   echo ""
   printf "Type 'yes' to confirm: "
@@ -155,15 +161,37 @@ else
   echo "No GlobalContext hooks found in settings.json."
 fi
 
-# Step 2 -- Remove store (unless --keep-data)
-if [ "$KEEP_DATA" = true ]; then
-  echo "Store preserved (--keep-data): $GC_BASE"
-elif [ "$store_exists" = true ]; then
-  echo "Deleting store: $GC_BASE ($file_count files, $store_size)..."
-  rm -rf "$GC_BASE"
-  echo "Store deleted."
+# Step 2 -- Handle store
+if [ "$PURGE" = true ]; then
+  # Full removal
+  if [ "$store_exists" = true ]; then
+    echo "Deleting store: $GC_BASE ($file_count files, $store_size)..."
+    rm -rf "$GC_BASE"
+    echo "Data deleted."
+  else
+    echo "Store not found at $GC_BASE."
+  fi
 else
-  echo "Store not found at $GC_BASE."
+  # Soft uninstall -- remove bin/ and lib/, preserve events/ and config
+  if [ "$store_exists" = true ]; then
+    if [ -d "$GC_BASE/bin" ]; then
+      rm -rf "$GC_BASE/bin"
+      echo "Removed: $GC_BASE/bin/"
+    fi
+    if [ -d "$GC_BASE/lib" ]; then
+      rm -rf "$GC_BASE/lib"
+      echo "Removed: $GC_BASE/lib/"
+    fi
+    if [ -d "$GC_BASE/projections" ]; then
+      rm -rf "$GC_BASE/projections"
+      echo "Removed: $GC_BASE/projections/"
+    fi
+    if [ -f "$GC_BASE/VERSION" ]; then
+      rm -f "$GC_BASE/VERSION"
+      echo "Removed: $GC_BASE/VERSION"
+    fi
+    echo "Data preserved: events/ and config.json"
+  fi
 fi
 
 # Summary
@@ -172,10 +200,10 @@ echo "Uninstall complete."
 if [ "$hooks_present" = true ]; then
   echo "  Hooks removed from $CLAUDE_SETTINGS_FILE"
 fi
-if [ "$KEEP_DATA" = true ]; then
-  echo "  Store preserved: $GC_BASE"
-elif [ "$store_exists" = true ]; then
-  echo "  Store deleted: $GC_BASE ($file_count files, $store_size)"
+if [ "$PURGE" = true ] && [ "$store_exists" = true ]; then
+  echo "  Store deleted: $GC_BASE"
+else
+  echo "  Store location: $GC_BASE (events preserved)"
 fi
 
 exit 0

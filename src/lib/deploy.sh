@@ -81,6 +81,19 @@ gc_deploy_files() {
     echo "  lib/ ($lib_count modules)    installed"
   fi
 
+  # Deploy top-level scripts (capture-event, gc-hook, gc-install-hooks)
+  for script in capture-event gc-hook gc-install-hooks; do
+    if [ -f "$src_dir/$script" ]; then
+      if [ "$dry_run" = "true" ]; then
+        echo "  Would install: bin/$script"
+      else
+        cp "$src_dir/$script" "$target_dir/bin/$script"
+        chmod 755 "$target_dir/bin/$script"
+        echo "  bin/$script    installed"
+      fi
+    fi
+  done
+
   # Deploy hook-config.json if it exists
   if [ -f "$src_dir/hook-config.json" ]; then
     if [ "$dry_run" = "true" ]; then

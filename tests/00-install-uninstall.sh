@@ -127,7 +127,7 @@ echo ""
   echo "--- Test 28: Purge requires confirmation ---"
   T=$(mktemp -d)
   _do_install "$T"
-  output=$(echo "no" | bash "$GC_UNINSTALL" --purge 2>&1)
+  output=$(echo "no" | bash "$GC_UNINSTALL" --purge 2>&1) || true
   assert_dir_exists "store preserved on decline" "$T/store"
   assert_contains "aborted message" "$output" "Aborted"
   rm -rf "$T"

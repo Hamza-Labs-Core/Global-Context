@@ -70,7 +70,7 @@ echo "=== T-1: Full uninstall with --force ==="
 # ===================================================================
 (
   tmpdir=$(setup_installed_env)
-  HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --force >/dev/null 2>&1
+  HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --purge --force >/dev/null 2>&1
   # Check hooks removed
   gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   assert_eq "hooks removed from settings.json" "0" "$gc_hook_count"
@@ -114,19 +114,19 @@ echo "=== T-2: --keep-data preserves store ==="
 
 # ===================================================================
 echo ""
-echo "=== T-3: --force skips confirmation ==="
+echo "=== T-3: --purge requires confirmation ==="
 # ===================================================================
 (
   tmpdir=$(setup_installed_env)
   exit_code=0
-  # Without --force and with no tty, read should fail or we pipe "no"
-  echo "no" | HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" >/dev/null 2>&1 || exit_code=$?
+  # --purge without --force requires confirmation; pipe "no" to decline
+  echo "no" | HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --purge 2>&1 >/dev/null || exit_code=$?
   # Should have aborted (exit 1 due to "no" confirmation)
   if [ "$exit_code" -ne 0 ]; then
-    echo "  PASS: non-force mode aborted without 'yes'"
+    echo "  PASS: purge aborted without 'yes'"
     _record_pass
   else
-    echo "  FAIL: should have aborted without 'yes' confirmation"
+    echo "  FAIL: purge should abort without 'yes' confirmation"
     _record_fail
   fi
   # Store should still exist
@@ -198,7 +198,7 @@ echo "=== T-7: After full uninstall, no GC hooks and no store ==="
 # ===================================================================
 (
   tmpdir=$(setup_installed_env)
-  HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --force >/dev/null 2>&1
+  HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --purge --force >/dev/null 2>&1
   # Verify no GC hooks
   gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   assert_eq "no GC hooks after full uninstall" "0" "$gc_hook_count"
@@ -220,7 +220,8 @@ echo "=== T-8: Reinstall after partial uninstall (--keep-data) ==="
   tmpdir=$(setup_installed_env)
   # Partial uninstall
   HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --force --keep-data >/dev/null 2>&1
-  # Reinstall
+  # Reinstall -- re-deploy bins first, then install hooks
+  HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" bash "$PROJECT_ROOT/src/bin/gc-install" --skip-hooks >/dev/null 2>&1
   HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" bash "$GC_INSTALL_HOOKS" install >/dev/null 2>&1
   hook_count=$(jq '.hooks | keys | length' "$tmpdir/home/.claude/settings.json")
   assert_eq "reinstall after --keep-data works" "10" "$hook_count"
