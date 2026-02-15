@@ -21,6 +21,230 @@ format_json() {
   fi
 }
 
+# _format_actions_markdown(data_json, actions_count)
+#
+# Render actions with progressive summarization for markdown:
+# - Last 20: full detail (tool name, target, result summary)
+# - 21-50 from end: tool name + target only
+# - 51-100 from end: grouped by tool type with count
+# - 100+ from end: one-line summary
+_format_actions_markdown() {
+  local data="$1"
+  local total="$2"
+
+  if [[ "$total" -le 20 ]]; then
+    # All actions get full detail
+    local i=0
+    while [[ $i -lt $total ]]; do
+      _render_action_full_md "$data" "$i"
+      i=$((i + 1))
+    done
+    return
+  fi
+
+  # Progressive summarization tiers (indices are 0-based)
+  # Tier 4 (100+ from end): one-line summary
+  # Tier 3 (51-100 from end): grouped by tool type
+  # Tier 2 (21-50 from end): tool name + target only
+  # Tier 1 (last 20): full detail
+
+  local tier1_start=$((total - 20))
+  local tier2_start=$((total - 50))
+  local tier3_start=$((total - 100))
+
+  [[ $tier2_start -lt 0 ]] && tier2_start=0
+  [[ $tier3_start -lt 0 ]] && tier3_start=0
+
+  # Tier 4: one-line summary for actions beyond index 100 from end
+  if [[ $tier3_start -gt 0 ]]; then
+    local tier4_count=$tier3_start
+    local tier4_tools
+    tier4_tools="$(printf '%s' "$data" | jq -r "[.actions[0:$tier4_count][].tool_name] | unique | length")"
+    echo "$tier4_count events across $tier4_tools tools (oldest, summarized)"
+    echo ""
+  fi
+
+  # Tier 3: grouped by tool type for actions 51-100 from end
+  if [[ $tier3_start -lt $tier2_start ]]; then
+    echo "**Grouped actions** (events $((tier3_start + 1))-${tier2_start}):"
+    printf '%s' "$data" | jq -r "
+      [.actions[$tier3_start:$tier2_start][].tool_name]
+      | group_by(.) | map({tool: .[0], count: length})
+      | sort_by(-.count)[]
+      | \"  - \(.tool) x\(.count)\"
+    "
+    echo ""
+  fi
+
+  # Tier 2: tool name + target only for actions 21-50 from end
+  if [[ $tier2_start -lt $tier1_start ]]; then
+    local i=$tier2_start
+    while [[ $i -lt $tier1_start ]]; do
+      local tool_name target
+      tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
+      target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
+      local line="$((i + 1)). **${tool_name}**"
+      if [[ -n "$target" && "$target" != "null" ]]; then
+        line="${line} on \`${target}\`"
+      fi
+      echo "$line"
+      i=$((i + 1))
+    done
+    echo ""
+  fi
+
+  # Tier 1: full detail for last 20 actions
+  local i=$tier1_start
+  while [[ $i -lt $total ]]; do
+    _render_action_full_md "$data" "$i"
+    i=$((i + 1))
+  done
+}
+
+# _render_action_full_md(data_json, index)
+#
+# Render a single action in full markdown detail.
+_render_action_full_md() {
+  local data="$1"
+  local i="$2"
+
+  local tool_name target result_summary
+  tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
+  target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
+  result_summary="$(printf '%s' "$data" | jq -r ".actions[$i].result_summary // \"\"")"
+
+  local line="$((i + 1)). **${tool_name}**"
+  if [[ -n "$target" && "$target" != "null" ]]; then
+    line="${line} on \`${target}\`"
+  fi
+  if [[ -n "$result_summary" && "$result_summary" != "null" ]]; then
+    line="${line} -- ${result_summary}"
+  fi
+  echo "$line"
+}
+
+# _format_actions_text(data_json, actions_count)
+#
+# Render actions with progressive summarization for text format.
+_format_actions_text() {
+  local data="$1"
+  local total="$2"
+
+  if [[ "$total" -le 20 ]]; then
+    local i=0
+    while [[ $i -lt $total ]]; do
+      local tool_name target
+      tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
+      target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
+      local line="  - ${tool_name}"
+      if [[ -n "$target" && "$target" != "null" ]]; then
+        line="${line} on ${target}"
+      fi
+      echo "$line"
+      i=$((i + 1))
+    done
+    return
+  fi
+
+  local tier1_start=$((total - 20))
+  local tier2_start=$((total - 50))
+  local tier3_start=$((total - 100))
+
+  [[ $tier2_start -lt 0 ]] && tier2_start=0
+  [[ $tier3_start -lt 0 ]] && tier3_start=0
+
+  # Tier 4: one-line summary
+  if [[ $tier3_start -gt 0 ]]; then
+    local tier4_count=$tier3_start
+    local tier4_tools
+    tier4_tools="$(printf '%s' "$data" | jq -r "[.actions[0:$tier4_count][].tool_name] | unique | length")"
+    echo "  $tier4_count events across $tier4_tools tools (oldest, summarized)"
+    echo ""
+  fi
+
+  # Tier 3: grouped by tool type
+  if [[ $tier3_start -lt $tier2_start ]]; then
+    echo "  Grouped actions (events $((tier3_start + 1))-${tier2_start}):"
+    printf '%s' "$data" | jq -r "
+      [.actions[$tier3_start:$tier2_start][].tool_name]
+      | group_by(.) | map({tool: .[0], count: length})
+      | sort_by(-.count)[]
+      | \"    - \(.tool) x\(.count)\"
+    "
+    echo ""
+  fi
+
+  # Tier 2: tool name + target only
+  if [[ $tier2_start -lt $tier1_start ]]; then
+    local i=$tier2_start
+    while [[ $i -lt $tier1_start ]]; do
+      local tool_name target
+      tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
+      target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
+      local line="  - ${tool_name}"
+      if [[ -n "$target" && "$target" != "null" ]]; then
+        line="${line} on ${target}"
+      fi
+      echo "$line"
+      i=$((i + 1))
+    done
+    echo ""
+  fi
+
+  # Tier 1: full detail (tool + target)
+  local i=$tier1_start
+  while [[ $i -lt $total ]]; do
+    local tool_name target
+    tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
+    target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
+    local line="  - ${tool_name}"
+    if [[ -n "$target" && "$target" != "null" ]]; then
+      line="${line} on ${target}"
+    fi
+    echo "$line"
+    i=$((i + 1))
+  done
+}
+
+# _gc_truncate_output(output_string, max_bytes)
+#
+# If output exceeds max_bytes, truncate tool results to 200 chars,
+# omit old action details, and add truncation note.
+# Outputs truncated text to stdout.
+_gc_truncate_output() {
+  local output="$1"
+  local max_bytes="${2:-204800}"  # 200KB default
+
+  local size=${#output}
+  if [[ "$size" -le "$max_bytes" ]]; then
+    printf '%s' "$output"
+    return
+  fi
+
+  # Truncate: remove lines longer than 200 chars (likely tool results)
+  local truncated=""
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ ${#line} -gt 200 ]]; then
+      truncated="${truncated}${line:0:200}...(truncated)
+"
+    else
+      truncated="${truncated}${line}
+"
+    fi
+  done <<< "$output"
+
+  # If still too large, take just the beginning
+  if [[ ${#truncated} -gt "$max_bytes" ]]; then
+    truncated="${truncated:0:$max_bytes}"
+  fi
+
+  printf '%s' "$truncated"
+  echo ""
+  echo "---"
+  echo "*Note: Output truncated from $size bytes to fit within ${max_bytes} byte limit.*"
+}
+
 # format_markdown(context_file_or_stdin)
 #
 # Render context projection as markdown with sections:
@@ -75,32 +299,14 @@ format_markdown() {
     echo ""
   fi
 
-  # Section 3: Actions Taken
+  # Section 3: Actions Taken (with progressive summarization)
   local actions_count
   actions_count="$(printf '%s' "$data" | jq -r '.actions | length // 0')"
 
   echo "## Actions Taken"
   echo ""
   if [[ "$actions_count" -gt 0 ]]; then
-    local i=0
-    while [[ $i -lt $actions_count ]]; do
-      local action
-      action="$(printf '%s' "$data" | jq -r ".actions[$i]")"
-      local tool_name target result_summary
-      tool_name="$(printf '%s' "$action" | jq -r '.tool_name // "unknown"')"
-      target="$(printf '%s' "$action" | jq -r '.target // ""')"
-      result_summary="$(printf '%s' "$action" | jq -r '.result_summary // ""')"
-
-      local line="${i+1}. **${tool_name}**"
-      if [[ -n "$target" && "$target" != "null" ]]; then
-        line="${line} on \`${target}\`"
-      fi
-      if [[ -n "$result_summary" && "$result_summary" != "null" ]]; then
-        line="${line} -- ${result_summary}"
-      fi
-      echo "$line"
-      i=$((i + 1))
-    done
+    _format_actions_markdown "$data" "$actions_count"
     echo ""
   else
     echo "No actions recorded."
@@ -225,18 +431,7 @@ format_text() {
   actions_count="$(printf '%s' "$data" | jq -r '.actions | length // 0')"
   if [[ "$actions_count" -gt 0 ]]; then
     echo "Actions:"
-    local i=0
-    while [[ $i -lt $actions_count ]]; do
-      local tool_name target
-      tool_name="$(printf '%s' "$data" | jq -r ".actions[$i].tool_name // \"unknown\"")"
-      target="$(printf '%s' "$data" | jq -r ".actions[$i].target // \"\"")"
-      local line="  - ${tool_name}"
-      if [[ -n "$target" && "$target" != "null" ]]; then
-        line="${line} on ${target}"
-      fi
-      echo "$line"
-      i=$((i + 1))
-    done
+    _format_actions_text "$data" "$actions_count"
     echo ""
   fi
 
