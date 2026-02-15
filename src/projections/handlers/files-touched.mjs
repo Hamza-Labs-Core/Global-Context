@@ -1,7 +1,7 @@
 // files-touched.mjs -- Files touched projection handler.
 // Tracks every file read, written, edited, globbed, or grepped during a session.
 // Extracts paths from both tool_input (request) and tool_response (result) per G-2.
-import { truncate, warn } from '../lib/utils.mjs';
+
 import { register, CURRENT_PROJECTION_VERSION } from '../lib/registry.mjs';
 
 /**

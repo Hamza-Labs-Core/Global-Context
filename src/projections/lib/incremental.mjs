@@ -90,8 +90,15 @@ export async function buildProjection(projectId, sessionId, projectionDef, optio
 
   // Update metadata
   result._rebuilt_at = new Date().toISOString();
-  if (highestSequence > 0) {
-    result._last_sequence = to ? Math.min(to, highestSequence) : highestSequence;
+  // Use the last sequence actually processed by the handler, not the highest
+  // event filename — skipped/corrupt events should not advance the cursor.
+  const lastProcessed = result._lastProcessedSequence || 0;
+  delete result._lastProcessedSequence; // internal field, not part of output
+  if (lastProcessed > 0) {
+    result._last_sequence = to ? Math.min(to, lastProcessed) : lastProcessed;
+  } else if (highestSequence > 0) {
+    // Fallback: no events were processed (all corrupt?), keep existing cursor
+    result._last_sequence = existingProjection ? (existingProjection._last_sequence || 0) : 0;
   }
 
   return result;

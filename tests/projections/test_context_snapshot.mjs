@@ -163,8 +163,8 @@ await test('progressive summarization with > 100KB output', async () => {
   let state = handler.init();
   state = handler.handle(state, makeEvent('SessionStarted', 1, { model: 'test' }));
   // Create many large prompts and tool calls to exceed 100KB
-  for (let i = 2; i < 200; i += 3) {
-    state = handler.handle(state, makeEvent('UserPromptReceived', i, { prompt: 'A'.repeat(500) }));
+  for (let i = 2; i < 500; i += 3) {
+    state = handler.handle(state, makeEvent('UserPromptReceived', i, { prompt: 'A'.repeat(800) }));
     state = handler.handle(state, makeEvent('ToolCallRequested', i + 1, {
       tool_name: 'Read',
       tool_input: { file_path: `/file${i}.js` },
@@ -172,14 +172,14 @@ await test('progressive summarization with > 100KB output', async () => {
     }));
     state = handler.handle(state, makeEvent('ToolCallCompleted', i + 2, {
       tool_name: 'Read',
-      tool_response: 'x'.repeat(500),
+      tool_response: 'x'.repeat(800),
       tool_use_id: `tu_${i}`,
     }));
   }
-  state = handler.handle(state, makeEvent('SessionEnded', 300, {}));
+  state = handler.handle(state, makeEvent('SessionEnded', 600, {}));
   const result = handler.finalize(state);
   // With this many entries it should have triggered at least one phase
-  assert.ok(result._summarization_applied.length >= 0);
+  assert.ok(result._summarization_applied.length > 0, 'Expected at least one summarization phase to be applied');
   // The result should still be valid
   assert.ok(result._projection_type === 'context');
   assert.ok(result.prompts.length > 0);

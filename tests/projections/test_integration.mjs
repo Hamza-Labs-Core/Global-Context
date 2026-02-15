@@ -6,9 +6,10 @@ import os from 'node:os';
 import { mkdtemp, rm, mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const execFileP = promisify(execFile);
-const CLI = path.resolve('/home/meywd/gc-worktrees/04-projection-engine/src/bin/project');
+const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/bin/project');
 
 let passed = 0;
 let failed = 0;

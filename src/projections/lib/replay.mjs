@@ -67,7 +67,14 @@ export async function replayThrough(projectId, sessionId, handler, options = {})
   let state = handler.init(existingState);
 
   // 5. Track seen tool_use_ids for duplicate detection (G-1)
+  // NOTE: seenToolUseIds resets per replayThrough() call. For incremental rebuilds,
+  // duplicates of events processed in a prior run will not be detected. This is an
+  // accepted limitation — full dedup would require persisting the seen set, which
+  // adds complexity for a rare edge case. Use --rebuild for a guaranteed-clean pass.
   const seenToolUseIds = new Map(); // "tool_use_id:event_type" -> sequence
+
+  // Track the last sequence actually processed by the handler
+  let lastProcessedSequence = 0;
 
   // 6. Stream through handler
   for (const file of files) {
@@ -102,10 +109,13 @@ export async function replayThrough(projectId, sessionId, handler, options = {})
     }
 
     state = handler.handle(state, event);
+    lastProcessedSequence = event.sequence;
   }
 
   // 7. Finalize
-  return handler.finalize(state);
+  const finalized = handler.finalize(state);
+  finalized._lastProcessedSequence = lastProcessedSequence;
+  return finalized;
 }
 
 /**
