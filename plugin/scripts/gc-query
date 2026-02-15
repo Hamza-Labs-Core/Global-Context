@@ -1,0 +1,328 @@
+#!/usr/bin/env bash
+# gc-query -- Query commands for the GlobalContext store (plugin version)
+# Subcommands:
+#   store-size   Report total event count, size, oldest/newest session
+#   status       Alias for store-size
+#   doctor       Health check for the GlobalContext system
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Resolve plugin root and source dependencies
+# ---------------------------------------------------------------------------
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# shellcheck source=../lib/paths.sh
+source "$PLUGIN_ROOT/lib/paths.sh"
+# shellcheck source=../lib/session_meta.sh
+source "$PLUGIN_ROOT/lib/session_meta.sh"
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+_gc_query_usage() {
+  echo "Usage: gc-query <subcommand> [options]"
+  echo ""
+  echo "Subcommands:"
+  echo "  store-size   Report total event count, size, oldest/newest session"
+  echo "  status       Alias for store-size"
+  echo "  doctor       Run health checks on the GlobalContext system"
+  echo "  last         Get context from the most recent session"
+  echo "  session      Get context from a specific session"
+  echo "  sessions     List all sessions"
+  echo "  search       Search across sessions"
+  echo "  replay       Replay a session as a narrative"
+  echo "  tail         Show last N events from a session"
+  echo "  events       Raw event access for a session"
+  echo ""
+  echo "Options:"
+  echo "  --format json|text|markdown   Output format (default: text)"
+  echo "  --help                        Show this help message"
+}
+
+# ---------------------------------------------------------------------------
+# Human-readable size formatting
+# ---------------------------------------------------------------------------
+_gc_format_size() {
+  local bytes="$1"
+  if [[ "$bytes" -eq 0 ]]; then
+    printf '0 B'
+    return
+  fi
+
+  local result
+  if [[ "$bytes" -ge 1073741824 ]]; then
+    result=$(awk "BEGIN { printf \"%.1f GB\", $bytes / 1073741824 }")
+  elif [[ "$bytes" -ge 1048576 ]]; then
+    result=$(awk "BEGIN { printf \"%.1f MB\", $bytes / 1048576 }")
+  elif [[ "$bytes" -ge 1024 ]]; then
+    result=$(awk "BEGIN { printf \"%.1f KB\", $bytes / 1024 }")
+  else
+    result="${bytes} B"
+  fi
+  printf '%s' "$result"
+}
+
+# ---------------------------------------------------------------------------
+# Format number with comma separators
+# ---------------------------------------------------------------------------
+_gc_format_number() {
+  local num="$1"
+  printf "%'d" "$num" 2>/dev/null || printf '%d' "$num"
+}
+
+# ---------------------------------------------------------------------------
+# store-size subcommand
+# ---------------------------------------------------------------------------
+_gc_query_store_size() {
+  local format="text"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format)
+        format="${2:?--format requires an argument}"
+        shift 2
+        ;;
+      --help)
+        echo "Usage: gc-query store-size [--format json|text]"
+        return 0
+        ;;
+      *)
+        echo "error: unknown option '$1'" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  local session_count=0
+  local total_events=0
+  local total_size_bytes=0
+  local oldest_session_id=""
+  local oldest_started_at=""
+  local newest_session_id=""
+  local newest_started_at=""
+
+  if [[ -d "$GC_EVENTS_DIR" ]]; then
+    for project_dir in "$GC_EVENTS_DIR"/*/; do
+      [[ -d "$project_dir" ]] || continue
+      for session_dir in "$project_dir"*/; do
+        [[ -d "$session_dir" ]] || continue
+        session_count=$((session_count + 1))
+
+        local event_count=0
+        for event_file in "$session_dir"[0-9]*.json; do
+          [[ -f "$event_file" ]] || continue
+          event_count=$((event_count + 1))
+          local file_size
+          file_size=$(stat -c '%s' "$event_file" 2>/dev/null || stat -f '%z' "$event_file" 2>/dev/null || echo 0)
+          total_size_bytes=$((total_size_bytes + file_size))
+        done
+        total_events=$((total_events + event_count))
+
+        if [[ -f "${session_dir}session.json" ]]; then
+          local meta_json
+          meta_json="$(cat "${session_dir}session.json")"
+          local sid started_at
+          sid=$(printf '%s' "$meta_json" | jq -r '.session_id // empty')
+          started_at=$(printf '%s' "$meta_json" | jq -r '.started_at // empty')
+
+          if [[ -n "$started_at" && -n "$sid" ]]; then
+            if [[ -z "$oldest_started_at" || "$started_at" < "$oldest_started_at" ]]; then
+              oldest_started_at="$started_at"
+              oldest_session_id="$sid"
+            fi
+            if [[ -z "$newest_started_at" || "$started_at" > "$newest_started_at" ]]; then
+              newest_started_at="$started_at"
+              newest_session_id="$sid"
+            fi
+          fi
+        fi
+      done
+    done
+  fi
+
+  if [[ "$format" == "json" ]]; then
+    local oldest_json newest_json
+    if [[ -n "$oldest_session_id" ]]; then
+      oldest_json=$(jq -n --arg sid "$oldest_session_id" --arg sat "$oldest_started_at" '{"session_id": $sid, "started_at": $sat}')
+    else
+      oldest_json="null"
+    fi
+    if [[ -n "$newest_session_id" ]]; then
+      newest_json=$(jq -n --arg sid "$newest_session_id" --arg sat "$newest_started_at" '{"session_id": $sid, "started_at": $sat}')
+    else
+      newest_json="null"
+    fi
+    jq -n \
+      --arg store_path "$GC_ROOT" \
+      --argjson session_count "$session_count" \
+      --argjson total_events "$total_events" \
+      --argjson total_size_bytes "$total_size_bytes" \
+      --argjson oldest_session "$oldest_json" \
+      --argjson newest_session "$newest_json" \
+      '{store_path:$store_path, session_count:$session_count, total_events:$total_events, total_size_bytes:$total_size_bytes, oldest_session:$oldest_session, newest_session:$newest_session}'
+  else
+    local formatted_events formatted_size
+    formatted_events=$(_gc_format_number "$total_events")
+    formatted_size=$(_gc_format_size "$total_size_bytes")
+    echo "GlobalContext Store: $GC_ROOT"
+    echo "Sessions:      $session_count"
+    echo "Total events:  $formatted_events"
+    echo "Total size:    $formatted_size"
+    if [[ -n "$oldest_session_id" ]]; then
+      echo "Oldest:        ${oldest_started_at%%T*} (session $oldest_session_id)"
+    else
+      echo "Oldest:        (none)"
+    fi
+    if [[ -n "$newest_session_id" ]]; then
+      echo "Newest:        ${newest_started_at%%T*} (session $newest_session_id)"
+    else
+      echo "Newest:        (none)"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# doctor subcommand
+# ---------------------------------------------------------------------------
+_gc_query_doctor() {
+  local issues=0
+  echo "GlobalContext Doctor"
+  echo "==================="
+  echo ""
+
+  # Check store directory
+  if [[ -d "$GC_ROOT" ]]; then
+    echo "[OK] Store directory exists: $GC_ROOT"
+  else
+    echo "[FAIL] Store directory missing: $GC_ROOT"
+    issues=$((issues + 1))
+  fi
+
+  # Check events directory
+  if [[ -d "$GC_EVENTS_DIR" ]]; then
+    echo "[OK] Events directory exists: $GC_EVENTS_DIR"
+  else
+    echo "[FAIL] Events directory missing: $GC_EVENTS_DIR"
+    issues=$((issues + 1))
+  fi
+
+  # Check projections directory
+  if [[ -d "$GC_PROJECTIONS_DIR" ]]; then
+    echo "[OK] Projections directory exists: $GC_PROJECTIONS_DIR"
+  else
+    echo "[FAIL] Projections directory missing: $GC_PROJECTIONS_DIR"
+    issues=$((issues + 1))
+  fi
+
+  # Check config.json
+  if [[ -f "$GC_CONFIG_FILE" ]]; then
+    if jq empty "$GC_CONFIG_FILE" 2>/dev/null; then
+      echo "[OK] config.json exists and is valid JSON"
+    else
+      echo "[FAIL] config.json exists but is not valid JSON"
+      issues=$((issues + 1))
+    fi
+  else
+    echo "[WARN] config.json missing"
+    issues=$((issues + 1))
+  fi
+
+  # Check plugin scripts
+  local script_dir
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  if [[ -x "$script_dir/gc-hook" ]]; then
+    echo "[OK] gc-hook script is executable"
+  else
+    echo "[FAIL] gc-hook script missing or not executable"
+    issues=$((issues + 1))
+  fi
+
+  if [[ -x "$script_dir/capture-event" ]]; then
+    echo "[OK] capture-event script is executable"
+  else
+    echo "[FAIL] capture-event script missing or not executable"
+    issues=$((issues + 1))
+  fi
+
+  # Check jq availability
+  if command -v jq &>/dev/null; then
+    echo "[OK] jq is available: $(jq --version 2>/dev/null || echo 'unknown version')"
+  else
+    echo "[FAIL] jq is not installed"
+    issues=$((issues + 1))
+  fi
+
+  # Check Node.js availability
+  if command -v node &>/dev/null; then
+    echo "[OK] Node.js is available: $(node --version 2>/dev/null || echo 'unknown version')"
+  else
+    echo "[WARN] Node.js is not installed (needed for projections)"
+  fi
+
+  # Disk space check
+  if [[ -d "$GC_ROOT" ]]; then
+    local avail_kb
+    avail_kb=$(df -P "$GC_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -n "$avail_kb" ]] && [[ "$avail_kb" -lt 10240 ]]; then
+      echo "[WARN] Low disk space: ${avail_kb}KB available"
+    elif [[ -n "$avail_kb" ]]; then
+      echo "[OK] Disk space: ${avail_kb}KB available"
+    fi
+  fi
+
+  echo ""
+  if [[ "$issues" -eq 0 ]]; then
+    echo "All checks passed."
+  else
+    echo "$issues issue(s) found."
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Stub subcommands (for commands that reference gc-query but aren't fully implemented)
+# ---------------------------------------------------------------------------
+_gc_query_stub() {
+  local subcmd="$1"
+  shift
+  echo "gc-query $subcmd: not yet implemented (Story 05)" >&2
+  echo "This subcommand will be available when Story 05 is complete." >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+main() {
+  if [[ $# -eq 0 ]]; then
+    _gc_query_usage
+    return 1
+  fi
+
+  local subcommand="$1"
+  shift
+
+  case "$subcommand" in
+    store-size|status)
+      _gc_query_store_size "$@"
+      ;;
+    doctor)
+      _gc_query_doctor "$@"
+      ;;
+    last|session|sessions|search|replay|tail|events)
+      _gc_query_stub "$subcommand" "$@"
+      ;;
+    --help|-h)
+      _gc_query_usage
+      return 0
+      ;;
+    *)
+      echo "error: unknown subcommand '$subcommand'" >&2
+      _gc_query_usage >&2
+      return 1
+      ;;
+  esac
+}
+
+main "$@"
