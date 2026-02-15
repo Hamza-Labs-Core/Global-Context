@@ -43,16 +43,28 @@ _gc_generate_uuid() {
   elif command -v uuidgen &>/dev/null; then
     uuidgen | tr '[:upper:]' '[:lower:]'
   else
-    # Fallback: pseudo-random hex
+    # Fallback: pseudo-random UUID v4 (RFC 4122 compliant)
+    # Version nibble = 4, variant bits = 10xx
     printf '%04x%04x-%04x-%04x-%04x-%04x%04x%04x' \
-      $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM $RANDOM
+      $RANDOM $RANDOM \
+      $RANDOM \
+      $(( (RANDOM & 0x0FFF) | 0x4000 )) \
+      $(( (RANDOM & 0x3FFF) | 0x8000 )) \
+      $RANDOM $RANDOM $RANDOM
   fi
 }
 
 # _gc_iso_timestamp()
 #   Returns current UTC time in ISO 8601 format with milliseconds.
+#   Falls back to no-millisecond format if %3N is not supported (e.g., macOS).
 _gc_iso_timestamp() {
-  date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"
+  local ms_check
+  ms_check="$(date -u +"%3N" 2>/dev/null)"
+  if [[ "$ms_check" =~ ^[0-9]{3}$ ]]; then
+    date -u +"%Y-%m-%dT%H:%M:%S.%3NZ"
+  else
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+  fi
 }
 
 # _gc_next_sequence(session_dir)
@@ -149,12 +161,14 @@ gc_write_event() {
     timestamp="$(_gc_iso_timestamp)"
 
     # Step 6: Construct envelope JSON (compact, single line)
+    # Note: session_id in the envelope preserves the original (unsanitized) value.
+    # The sanitized version is used only for directory paths.
     local envelope
     envelope="$(jq -c -n \
       --arg eid "$event_id" \
       --arg etype "$event_type" \
       --arg pid "$project_id" \
-      --arg sid "$sanitized_session_id" \
+      --arg sid "$session_id" \
       --argjson seq "$sequence" \
       --arg ts "$timestamp" \
       --argjson data "$data_json" \
@@ -222,12 +236,13 @@ gc_write_event() {
 
     # We don't have the lock, so sequence is unknown. Use 0 as placeholder.
     # The projection engine will reconcile orphans.
+    # Note: session_id in the envelope preserves the original (unsanitized) value.
     local envelope
     envelope="$(jq -c -n \
       --arg eid "$event_id" \
       --arg etype "$event_type" \
       --arg pid "$project_id" \
-      --arg sid "$sanitized_session_id" \
+      --arg sid "$session_id" \
       --argjson seq 0 \
       --arg ts "$timestamp" \
       --argjson data "$data_json" \
