@@ -211,12 +211,14 @@ assert_eq "16b. agent has frontmatter" "---" "$AGENT_FIRST"
 # Test 17: All library files exist in plugin/lib/ (Task 8)
 # -----------------------------------------------------------------------
 LIB_COUNT=0
-for lib in paths.sh sanitize.sh atomic_write.sh uuid.sh timestamp.sh debug_log.sh json_validate.sh session_dir.sh session_meta.sh event_write.sh; do
+for lib in paths.sh sanitize.sh atomic_write.sh uuid.sh timestamp.sh debug_log.sh json_validate.sh session_dir.sh session_meta.sh event_write.sh latest_symlink.sh session_read.sh projection_check.sh session_resolve.sh context_loader.sh format_context.sh session_chain.sh; do
   if [ -f "$PLUGIN_DIR/lib/$lib" ]; then
     LIB_COUNT=$((LIB_COUNT + 1))
+  else
+    echo "  Missing lib: $lib"
   fi
 done
-assert_eq "17. all 10 core library files exist" "10" "$LIB_COUNT"
+assert_eq "17. all 17 library files exist" "17" "$LIB_COUNT"
 
 # -----------------------------------------------------------------------
 # Test 18: paths.sh resolves GC_ROOT correctly (Task 8)
@@ -360,18 +362,94 @@ echo '{"session_id":"debug-test"}' | GC_DEBUG=1 "$PLUGIN_DIR/scripts/gc-hook" Se
 assert "28. debug logging writes to log file" test -f "$DEBUG_STORE/logs/hook.log"
 
 # -----------------------------------------------------------------------
-# Test 29: gc-query status runs from plugin scripts/ (Tasks 5, 8)
+# Test 29: gc-query store-size runs from plugin scripts/ (Tasks 5, 8)
 # -----------------------------------------------------------------------
 export CLAUDE_CONTEXT_PATH="$TEST_DIR/store"
 mkdir -p "$CLAUDE_CONTEXT_PATH/events"
-STATUS_OUTPUT=$("$PLUGIN_DIR/scripts/gc-query" status 2>/dev/null)
-assert_contains "29. gc-query status runs" "GlobalContext Store" "$STATUS_OUTPUT"
+STATUS_OUTPUT=$("$PLUGIN_DIR/scripts/gc-query" store-size 2>/dev/null)
+assert_contains "29. gc-query store-size runs" "GlobalContext Store" "$STATUS_OUTPUT"
 
 # -----------------------------------------------------------------------
 # Test 30: gc-query doctor runs from plugin scripts/ (Tasks 5, 8)
 # -----------------------------------------------------------------------
 DOCTOR_OUTPUT=$("$PLUGIN_DIR/scripts/gc-query" doctor 2>/dev/null)
 assert_contains "30. gc-query doctor runs" "GlobalContext Doctor" "$DOCTOR_OUTPUT"
+
+# -----------------------------------------------------------------------
+# Test 31: Story-05 bash libs are sourceable (Task 8 extended)
+# -----------------------------------------------------------------------
+S05_SOURCEABLE=true
+for lib in session_read.sh projection_check.sh session_resolve.sh context_loader.sh format_context.sh session_chain.sh latest_symlink.sh; do
+  if ! bash -c "source '$PLUGIN_DIR/lib/$lib'" 2>/dev/null; then
+    S05_SOURCEABLE=false
+    echo "  Cannot source: $lib"
+  fi
+done
+assert "31. Story-05 bash libs are sourceable" $S05_SOURCEABLE
+
+# -----------------------------------------------------------------------
+# Test 32: Node.js projection engine files exist (Task 8 extended)
+# -----------------------------------------------------------------------
+PROJ_COUNT=0
+for f in \
+  "lib/projections/lib/paths.mjs" \
+  "lib/projections/lib/registry.mjs" \
+  "lib/projections/lib/incremental.mjs" \
+  "lib/projections/lib/replay.mjs" \
+  "lib/projections/lib/formatters.mjs" \
+  "lib/projections/lib/utils.mjs" \
+  "lib/projections/lib/summary-generators.mjs" \
+  "lib/projections/handlers/timeline.mjs" \
+  "lib/projections/handlers/files-touched.mjs" \
+  "lib/projections/handlers/decisions.mjs" \
+  "lib/projections/handlers/summary.mjs" \
+  "lib/projections/handlers/context-snapshot.mjs"; do
+  if [ -f "$PLUGIN_DIR/$f" ]; then
+    PROJ_COUNT=$((PROJ_COUNT + 1))
+  else
+    echo "  Missing: $f"
+  fi
+done
+assert_eq "32. all 12 projection engine files exist" "12" "$PROJ_COUNT"
+
+# -----------------------------------------------------------------------
+# Test 33: project CLI exists and is executable (Task 8 extended)
+# -----------------------------------------------------------------------
+assert "33. project CLI exists" test -f "$PLUGIN_DIR/scripts/project"
+assert "33b. project CLI is executable" test -x "$PLUGIN_DIR/scripts/project"
+
+# -----------------------------------------------------------------------
+# Test 34: gc-query subcommands are implemented (not stubs)
+# -----------------------------------------------------------------------
+NO_STUBS=true
+for subcmd in last session sessions search replay tail events; do
+  if grep -q "_gc_query_stub.*$subcmd" "$PLUGIN_DIR/scripts/gc-query" 2>/dev/null; then
+    NO_STUBS=false
+    echo "  Still stubbed: $subcmd"
+  fi
+done
+assert "34. gc-query has no stub subcommands" $NO_STUBS
+
+# -----------------------------------------------------------------------
+# Test 35: gc-query sources all Story-05 libs
+# -----------------------------------------------------------------------
+SOURCES_OK=true
+for lib in session_read.sh projection_check.sh session_resolve.sh context_loader.sh format_context.sh session_chain.sh; do
+  if ! grep -q "$lib" "$PLUGIN_DIR/scripts/gc-query" 2>/dev/null; then
+    SOURCES_OK=false
+    echo "  gc-query does not source: $lib"
+  fi
+done
+assert "35. gc-query sources all Story-05 libs" $SOURCES_OK
+
+# -----------------------------------------------------------------------
+# Test 36: gc-query status works (replaces old store-size alias test)
+# -----------------------------------------------------------------------
+export CLAUDE_CONTEXT_PATH="$TEST_DIR/store"
+mkdir -p "$CLAUDE_CONTEXT_PATH/events" "$CLAUDE_CONTEXT_PATH/projections"
+echo '{"version":"1.0.0","source":"plugin"}' > "$CLAUDE_CONTEXT_PATH/config.json"
+STATUS_OUT=$("$PLUGIN_DIR/scripts/gc-query" status 2>/dev/null)
+assert_contains "36. gc-query status works" "Store is empty" "$STATUS_OUT"
 
 # -----------------------------------------------------------------------
 # Summary

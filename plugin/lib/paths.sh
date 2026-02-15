@@ -21,6 +21,7 @@ GC_PROJECTIONS_DIR="$GC_ROOT/projections"
 GC_LOG_DIR="$GC_ROOT/logs"
 GC_CONFIG_FILE="$GC_ROOT/config.json"
 GC_LOG_FILE="$GC_LOG_DIR/hook.log"
+GC_BIN_DIR="$GC_ROOT/bin"
 
 # ---------------------------------------------------------------------------
 # Helper functions
