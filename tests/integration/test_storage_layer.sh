@@ -508,6 +508,10 @@ echo "=== Integration Test 9: CLAUDE_CONTEXT_PATH custom path ==="
   CUSTOM_STORE=$(_make_store)
   export CLAUDE_CONTEXT_PATH="$CUSTOM_STORE"
 
+  # Override HOME to a temp directory so the default-store check is meaningful
+  FAKE_HOME=$(_make_store)
+  export HOME="$FAKE_HOME"
+
   # Init
   bash "$BIN_DIR/gc-init" >/dev/null 2>&1
   assert_true "custom store root exists" test -d "$CUSTOM_STORE"
@@ -539,7 +543,7 @@ echo "=== Integration Test 9: CLAUDE_CONTEXT_PATH custom path ==="
   assert_eq "gc-query total_events is 3" "3" "$query_events"
 
   # Verify default store was NOT touched
-  assert_false "default store NOT created" test -d "$HOME/.claude-context-should-not-exist"
+  assert_false "default store NOT created" test -d "$HOME/.claude-context"
 )
 
 # =====================================================================

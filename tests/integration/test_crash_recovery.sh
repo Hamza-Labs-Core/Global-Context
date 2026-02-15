@@ -187,16 +187,24 @@ echo "=== Crash Recovery Test 3: Flock timeout produces orphan event file ==="
   lock_file="$session_dir/.lock"
 
   # Hold the lock for longer than the 5-second timeout
+  lock_ready_marker="$session_dir/.lock-holder-ready"
+  rm -f "$lock_ready_marker"
   (
     exec 9>"$lock_file"
     flock 9
+    touch "$lock_ready_marker"
     sleep 8
     exec 9>&-
   ) &
   holder_pid=$!
 
-  # Give the holder a moment to acquire the lock
-  sleep 0.5
+  # Wait deterministically for the lock holder to acquire the lock
+  for _i in $(seq 1 100); do
+    [ -f "$lock_ready_marker" ] && break
+    sleep 0.05
+  done
+  rm -f "$lock_ready_marker"
+  if ! [ -f "$lock_ready_marker" ] 2>/dev/null; then :; fi
 
   # Attempt to write an event -- should timeout and write orphan
   GC_PROJECT_DIR="$proj" gc_write_event "flock-s1" "TurnCompleted" '{"orphan": true}' >/dev/null 2>/dev/null || true
