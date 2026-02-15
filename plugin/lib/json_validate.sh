@@ -47,7 +47,7 @@ gc_validate_event_json() {
   local seq_type
   seq_type=$(echo "$json_string" | jq -r '.sequence | type')
   if [ "$seq_type" != "number" ]; then
-    echo "gc_validate_event_json: 'sequence' must be a positive integer, got $seq_type" >&2
+    echo "gc_validate_event_json: 'sequence' must be a number, got $seq_type" >&2
     return 1
   fi
 

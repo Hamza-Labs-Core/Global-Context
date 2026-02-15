@@ -58,11 +58,11 @@ _gc_fsync() {
 
   if command -v python3 &>/dev/null; then
     python3 -c "
-import os
-fd = os.open('$file_path', os.O_RDONLY)
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
 os.fsync(fd)
 os.close(fd)
-" 2>/dev/null && return 0
+" "$file_path" 2>/dev/null && return 0
   fi
 
   if dd if="$file_path" of="$file_path" conv=notrunc,fdatasync count=0 2>/dev/null; then

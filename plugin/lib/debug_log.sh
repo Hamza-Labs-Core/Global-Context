@@ -9,6 +9,20 @@ source "$_LIB_DIR/paths.sh"
 # Max log file size before rotation (1MB)
 _GC_MAX_LOG_SIZE=1048576
 
+# Detect if date supports %3N (GNU date). BSD date does not.
+_GC_DEBUG_DATE_HAS_MILLIS=""
+_gc_debug_check_date_millis() {
+  if [ -z "$_GC_DEBUG_DATE_HAS_MILLIS" ]; then
+    local test_val
+    test_val="$(date -u +"%3N" 2>/dev/null)"
+    if [[ "$test_val" =~ ^[0-9]{3}$ ]]; then
+      _GC_DEBUG_DATE_HAS_MILLIS="yes"
+    else
+      _GC_DEBUG_DATE_HAS_MILLIS="no"
+    fi
+  fi
+}
+
 # gc_debug_log(message)
 #   Writes a timestamped log entry to $GC_LOG_FILE if GC_DEBUG=1.
 #   Creates the log directory if needed. Rotates if log exceeds max size.
@@ -32,7 +46,12 @@ gc_debug_log() {
   fi
 
   # Write log entry
+  _gc_debug_check_date_millis
   local ts
-  ts="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+  if [ "$_GC_DEBUG_DATE_HAS_MILLIS" = "yes" ]; then
+    ts="$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")"
+  else
+    ts="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
+  fi
   printf '%s [%s] %s\n' "$ts" "$$" "$message" >> "$GC_LOG_FILE" 2>/dev/null || true
 }

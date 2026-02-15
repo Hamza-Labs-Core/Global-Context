@@ -18,7 +18,6 @@ source "$PLUGIN_ROOT/lib/paths.sh"
 source "$PLUGIN_ROOT/lib/sanitize.sh"
 source "$PLUGIN_ROOT/lib/session_dir.sh"
 source "$PLUGIN_ROOT/lib/atomic_write.sh"
-source "$PLUGIN_ROOT/lib/json_validate.sh"
 source "$PLUGIN_ROOT/lib/session_meta.sh"
 source "$PLUGIN_ROOT/lib/uuid.sh"
 source "$PLUGIN_ROOT/lib/timestamp.sh"
@@ -68,9 +67,36 @@ SESSION_DIR="$(gc_ensure_session_dir "$PROJECT_ID" "$SANITIZED_SESSION_ID")"
 # Acquire flock, determine sequence, write event
 # ---------------------------------------------------------------------------
 LOCK_FILE="$SESSION_DIR/.lock"
-exec 9>"$LOCK_FILE"
 
-if flock -w 5 9; then
+_gc_acquire_lock() {
+  if command -v flock &>/dev/null; then
+    exec 9>"$LOCK_FILE"
+    flock -w 5 9
+  else
+    # Portable mkdir-based lock fallback (atomic on all POSIX systems)
+    local lock_dir="${LOCK_FILE}.d"
+    local deadline=$(( $(date +%s) + 5 ))
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        return 1
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    # Ensure cleanup on exit
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    return 0
+  fi
+}
+
+_gc_release_lock() {
+  if command -v flock &>/dev/null; then
+    exec 9>&-
+  else
+    rmdir "${LOCK_FILE}.d" 2>/dev/null || true
+  fi
+}
+
+if _gc_acquire_lock; then
   # Determine next sequence number
   HIGHEST=0
   for f in "$SESSION_DIR"/[0-9]*.json; do
@@ -119,9 +145,9 @@ if flock -w 5 9; then
     gc_session_meta_update "$SESSION_DIR" "$EVENT_TYPE" "$TIMESTAMP"
   fi
 
-  exec 9>&-
+  _gc_release_lock
 else
-  exec 9>&-
+  _gc_release_lock
 
   # Orphan fallback
   EVENT_ID="$(gc_generate_uuid)"

@@ -6,8 +6,17 @@
   "repository": "https://github.com/globalcontext/globalcontext",
   "author": "GlobalContext",
   "license": "MIT",
-  "keywords": ["context", "sessions", "event-sourcing", "recovery", "compaction"],
-  "categories": ["productivity", "developer-tools"],
+  "keywords": [
+    "context",
+    "sessions",
+    "event-sourcing",
+    "recovery",
+    "compaction"
+  ],
+  "categories": [
+    "productivity",
+    "developer-tools"
+  ],
   "install": {
     "type": "git",
     "url": "https://github.com/globalcontext/globalcontext.git",
@@ -17,5 +26,9 @@
     "jq": ">=1.6",
     "bash": ">=4.0",
     "node": ">=18.0.0"
-  }
+  },
+  "supported_os": [
+    "linux",
+    "darwin"
+  ]
 }

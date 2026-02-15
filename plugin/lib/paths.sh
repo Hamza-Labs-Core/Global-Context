@@ -97,6 +97,15 @@ gc_derive_project_id() {
   base=$(basename "$project_dir" | tr -cd 'a-zA-Z0-9_-')
   [ -z "$base" ] && base="_root"
   local hash
-  hash=$(printf '%s' "$project_dir" | sha256sum | cut -c1-6)
+  if command -v sha256sum &>/dev/null; then
+    hash=$(printf '%s' "$project_dir" | sha256sum | cut -c1-6)
+  elif command -v shasum &>/dev/null; then
+    hash=$(printf '%s' "$project_dir" | shasum -a 256 | cut -c1-6)
+  elif command -v openssl &>/dev/null; then
+    hash=$(printf '%s' "$project_dir" | openssl dgst -sha256 | awk '{print $NF}' | cut -c1-6)
+  else
+    # Last resort: use cksum as a fallback (not SHA-256 but deterministic)
+    hash=$(printf '%s' "$project_dir" | cksum | awk '{printf "%06x", $1}' | cut -c1-6)
+  fi
   printf '%s' "${base}-${hash}"
 }

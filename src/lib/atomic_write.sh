@@ -81,11 +81,11 @@ _gc_fsync() {
   # Try python3 os.fsync
   if command -v python3 &>/dev/null; then
     python3 -c "
-import os
-fd = os.open('$file_path', os.O_RDONLY)
+import os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
 os.fsync(fd)
 os.close(fd)
-" 2>/dev/null && return 0
+" "$file_path" 2>/dev/null && return 0
   fi
 
   # Fallback: dd with fdatasync (Linux)
