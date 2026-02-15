@@ -46,7 +46,10 @@ export async function buildProjection(projectId, sessionId, projectionDef, optio
   let existingProjection = null;
   let startFrom = from || 1;
 
-  if (!rebuild) {
+  // If explicit range is provided, skip incremental and do a fresh build
+  const hasExplicitRange = from !== undefined || to !== undefined;
+
+  if (!rebuild && !hasExplicitRange) {
     existingProjection = await loadExistingProjection(projectId, sessionId, projectionDef);
 
     if (existingProjection) {
