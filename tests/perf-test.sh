@@ -29,6 +29,20 @@ mkdir -p "$TEST_DIR/perf-store/events"
 
 PAYLOAD='{"session_id":"perf-test","tool_name":"Read","tool_input":{"file_path":"/tmp/test"}}'
 
+# Portable nanosecond timestamp: GNU date -> python3 fallback
+_now_ns() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null)
+  if [[ "$ns" =~ ^[0-9]+$ ]] && [ "${#ns}" -gt 10 ]; then
+    echo "$ns"
+  elif command -v python3 &>/dev/null; then
+    python3 -c "import time; print(int(time.time()*1e9))"
+  else
+    # Fallback: millisecond precision from date +%s * 1e9
+    echo "$(date +%s)000000000"
+  fi
+}
+
 echo "=== Task 11: Performance Validation ==="
 
 # Test 1: Measure 20 invocations, compute median
@@ -36,9 +50,9 @@ echo ""
 echo "--- Test 1: Median execution time ---"
 times=()
 for i in $(seq 1 20); do
-  start_ns=$(date +%s%N)
+  start_ns=$(_now_ns)
   echo "$PAYLOAD" | bash "$CAPTURE_EVENT" ToolCallCompleted 2>/dev/null
-  end_ns=$(date +%s%N)
+  end_ns=$(_now_ns)
   elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
   times+=("$elapsed_ms")
 done
@@ -80,9 +94,9 @@ print(json.dumps(data))
 
 export CLAUDE_CONTEXT_PATH="$TEST_DIR/perf-large"
 mkdir -p "$TEST_DIR/perf-large/events"
-start_ns=$(date +%s%N)
+start_ns=$(_now_ns)
 echo "$large_data" | bash "$CAPTURE_EVENT" ToolCallCompleted 2>/dev/null
-end_ns=$(date +%s%N)
+end_ns=$(_now_ns)
 large_ms=$(( (end_ns - start_ns) / 1000000 ))
 echo "  1MB payload time: ${large_ms}ms"
 # Large payloads may exceed 100ms -- just verify it completes

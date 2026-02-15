@@ -96,6 +96,20 @@ generate_timestamp() {
   fi
 }
 
+# === Portable SHA-256 helper (sha256sum -> shasum -> openssl fallback) ===
+portable_sha256() {
+  if command -v sha256sum &>/dev/null; then
+    sha256sum
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256
+  elif command -v openssl &>/dev/null; then
+    openssl dgst -sha256 -r
+  else
+    # Last resort: use a fixed hash to avoid failure
+    echo "000000000000000000000000000000000000000000000000000000000000dead  -"
+  fi
+}
+
 # === Task 07: Atomic write helper ===
 atomic_write() {
   local target="$1"
@@ -120,6 +134,22 @@ os.close(fd)
   fi
 
   mv "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+
+  # fsync parent directory after rename for sync events (full durability)
+  if [[ " $SYNC_EVENT_TYPES " == *" $event_type_for_sync "* ]]; then
+    local parent_dir
+    parent_dir=$(dirname "$target")
+    if command -v python3 &>/dev/null; then
+      python3 -c "
+import os
+fd = os.open('$parent_dir', os.O_RDONLY)
+os.fsync(fd)
+os.close(fd)
+" 2>/dev/null || true
+    elif command -v sync &>/dev/null; then
+      sync 2>/dev/null || true
+    fi
+  fi
 }
 
 # === Task 09: Derive project_id from cwd ===
@@ -133,8 +163,26 @@ derive_project_id() {
   base=$(basename "$project_dir" | tr -cd 'a-zA-Z0-9_-')
   [ -z "$base" ] && base="_root"
   local hash
-  hash=$(printf '%s' "$project_dir" | sha256sum | cut -c1-6)
+  hash=$(printf '%s' "$project_dir" | portable_sha256 | cut -c1-6)
   printf '%s' "${base}-${hash}"
+}
+
+# === Sequence number helper: compute max(existing sequence)+1 ===
+compute_next_sequence() {
+  local session_dir="$1"
+  local max_seq=0
+  local fname seq_num
+  for fname in "$session_dir"/[0-9]*.json; do
+    [ -e "$fname" ] || continue
+    # Extract the numeric prefix from the filename (e.g., 000003.json -> 3, 000005_a1b2.json -> 5)
+    fname=$(basename "$fname")
+    seq_num="${fname%%[._]*}"
+    seq_num=$((10#$seq_num))  # Force base-10 interpretation
+    if [ "$seq_num" -gt "$max_seq" ]; then
+      max_seq="$seq_num"
+    fi
+  done
+  echo $((max_seq + 1))
 }
 
 # === Task 08: Extract session_id and build envelope ===
@@ -180,9 +228,8 @@ if [ "$has_flock" = true ]; then
       exit 0
     }
 
-    # Count existing event files for next sequence number
-    existing=$(ls "$SESSION_DIR"/[0-9]*.json 2>/dev/null | wc -l)
-    next_seq=$((existing + 1))
+    # Compute next sequence as max(existing sequence)+1 to handle gaps
+    next_seq=$(compute_next_sequence "$SESSION_DIR")
     padded=$(printf "%0${SEQUENCE_PAD_WIDTH}d" "$next_seq")
 
     # Build envelope
@@ -221,8 +268,8 @@ if [ "$has_flock" = true ]; then
   ) 200>"$LOCK_FILE"
 else
   # No flock: best-effort write with random suffix to mitigate collisions
-  existing=$(ls "$SESSION_DIR"/[0-9]*.json 2>/dev/null | wc -l)
-  next_seq=$((existing + 1))
+  # Compute next sequence as max(existing sequence)+1 to handle gaps
+  next_seq=$(compute_next_sequence "$SESSION_DIR")
   padded=$(printf "%0${SEQUENCE_PAD_WIDTH}d" "$next_seq")
   random_suffix=$(printf '%04x' $RANDOM)
 

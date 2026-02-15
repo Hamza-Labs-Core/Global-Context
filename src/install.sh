@@ -7,15 +7,27 @@
 #   CLAUDE_CONTEXT_PATH - override storage root (default: ~/.claude-context)
 set -euo pipefail
 
-# === Base directory resolution (inline pattern -- see docs/CONVENTIONS.md) ===
-BASE_DIR="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
-EVENTS_DIR="$BASE_DIR/events"
-PROJECTIONS_DIR="$BASE_DIR/projections"
-BIN_DIR="$BASE_DIR/bin"
-CONFIG_FILE="$BASE_DIR/config.json"
-
 # Resolve the directory where this script lives (for locating capture-event source)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# === Base directory resolution: source paths.sh if available, else inline pattern ===
+PATHS_SH="$SCRIPT_DIR/lib/paths.sh"
+if [ -f "$PATHS_SH" ]; then
+  # shellcheck source=lib/paths.sh
+  source "$PATHS_SH"
+  BASE_DIR="$GC_ROOT"
+  EVENTS_DIR="$GC_EVENTS_DIR"
+  PROJECTIONS_DIR="$GC_PROJECTIONS_DIR"
+  BIN_DIR="$GC_BIN_DIR"
+  CONFIG_FILE="$GC_CONFIG_FILE"
+else
+  # Fallback inline pattern for standalone operation
+  BASE_DIR="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+  EVENTS_DIR="$BASE_DIR/events"
+  PROJECTIONS_DIR="$BASE_DIR/projections"
+  BIN_DIR="$BASE_DIR/bin"
+  CONFIG_FILE="$BASE_DIR/config.json"
+fi
 
 # === Dependency validation ===
 echo "Checking dependencies..."
@@ -44,11 +56,18 @@ else
   echo "  uuidgen: found"
 fi
 
-# sha256sum: needed for project_id derivation
-if ! command -v sha256sum &>/dev/null; then
-  echo "  WARNING: sha256sum not found. Project ID derivation may fail." >&2
-else
+# sha256sum: needed for project_id derivation -- check with fallbacks
+if command -v sha256sum &>/dev/null; then
   echo "  sha256sum: found"
+elif command -v shasum &>/dev/null; then
+  echo "  sha256sum: not found (using shasum -a 256 fallback)"
+elif command -v openssl &>/dev/null; then
+  echo "  sha256sum: not found (using openssl dgst -sha256 fallback)"
+else
+  echo "ERROR: No SHA-256 tool found. Need one of: sha256sum, shasum, or openssl." >&2
+  echo "  Install with: sudo apt-get install coreutils (Debian/Ubuntu)" >&2
+  echo "                (shasum/openssl are pre-installed on macOS)" >&2
+  exit 1
 fi
 
 # === Create directory structure ===

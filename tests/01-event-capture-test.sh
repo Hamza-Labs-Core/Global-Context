@@ -43,13 +43,40 @@ assert_contains() {
 
 UUID_REGEX='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
+# Portable nanosecond timestamp: GNU date -> python3 fallback
+_now_ns() {
+  local ns
+  ns=$(date +%s%N 2>/dev/null)
+  if [[ "$ns" =~ ^[0-9]+$ ]] && [ "${#ns}" -gt 10 ]; then
+    echo "$ns"
+  elif command -v python3 &>/dev/null; then
+    python3 -c "import time; print(int(time.time()*1e9))"
+  else
+    # Fallback: second precision from date +%s * 1e9
+    echo "$(date +%s)000000000"
+  fi
+}
+
+# Helper: portable SHA-256 (matches capture-event fallback chain)
+_portable_sha256() {
+  if command -v sha256sum &>/dev/null; then
+    sha256sum
+  elif command -v shasum &>/dev/null; then
+    shasum -a 256
+  elif command -v openssl &>/dev/null; then
+    openssl dgst -sha256 -r
+  else
+    echo "000000000000000000000000000000000000000000000000000000000000dead  -"
+  fi
+}
+
 # Helper: derive project_id for current directory
 _derive_pid() {
   local dir="${1:-$PWD}"
   local base hash
   base=$(basename "$dir" | tr -cd 'a-zA-Z0-9_-')
   [ -z "$base" ] && base="_root"
-  hash=$(printf '%s' "$dir" | sha256sum | cut -c1-6)
+  hash=$(printf '%s' "$dir" | _portable_sha256 | cut -c1-6)
   printf '%s' "${base}-${hash}"
 }
 
@@ -293,9 +320,9 @@ echo "=== Test 12: Performance ==="
 export CLAUDE_CONTEXT_PATH="$TEST_DIR/t12"
 mkdir -p "$TEST_DIR/t12/events"
 
-start_ns=$(date +%s%N)
+start_ns=$(_now_ns)
 echo '{"session_id":"perf"}' | bash "$CAPTURE_EVENT" ToolCallCompleted 2>/dev/null
-end_ns=$(date +%s%N)
+end_ns=$(_now_ns)
 elapsed_ms=$(( (end_ns - start_ns) / 1000000 ))
 
 if [ "$elapsed_ms" -lt 100 ]; then

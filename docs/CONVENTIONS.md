@@ -2,9 +2,9 @@
 
 ## Base Directory Resolution
 
-Every script in the GlobalContext system must resolve the storage root using the shared `paths.sh` library. No script should hardcode `~/.claude-context`.
+Every script in the GlobalContext system must resolve the storage root consistently. No script should hardcode `~/.claude-context` as a literal path -- always use `$CLAUDE_CONTEXT_PATH` with the default fallback.
 
-### Pattern (via paths.sh)
+### Pattern (via paths.sh -- preferred)
 
 ```bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,16 +34,21 @@ This is useful for:
 - Custom installations
 - CI/CD environments
 
-### Inline Pattern (for standalone scripts)
+### Inline Pattern (exception for standalone scripts)
 
-For scripts that cannot source `paths.sh` (e.g., `capture-event` which must be self-contained for performance), use the inline pattern:
+Scripts that must be fully self-contained for performance reasons (e.g., `capture-event`,
+which runs on every hook invocation and cannot afford the overhead of sourcing a library)
+may use the inline pattern instead of sourcing `paths.sh`:
 
 ```bash
 BASE_DIR="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 EVENTS_DIR="$BASE_DIR/events"
 ```
 
-This must appear at the top of every standalone script, before any path references.
+This is an intentional exception, not a violation of the "no hardcoded paths" rule.
+The key requirement is that `CLAUDE_CONTEXT_PATH` is always respected as an override.
+Scripts that are not performance-critical (e.g., `install.sh`) should source `paths.sh`
+when available, falling back to the inline pattern only if `paths.sh` is not found.
 
 ## Event Types
 
