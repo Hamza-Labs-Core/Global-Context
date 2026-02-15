@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# GlobalContext plugin hook wrapper v1
+# Usage: gc-hook <EventType>
+# Called by Claude Code hooks. Reads JSON from stdin, passes to capture-event.
+# GUARANTEES: exit 0, zero stdout, zero stderr.
+
+EVENT_TYPE="${1:?Missing event type}"
+
+# Resolve code paths from plugin root
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Resolve data path: CLAUDE_CONTEXT_PATH env var, or default
+GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+
+# Source shared libraries from plugin
+source "$PLUGIN_ROOT/lib/paths.sh" 2>/dev/null || true
+
+# Auto-init: check if store exists, run gc-init if not
+if [ ! -d "$GC_BASE/events" ]; then
+  "$PLUGIN_ROOT/scripts/gc-init" 2>/dev/null || true
+fi
+
+# Run capture-event from plugin scripts directory
+if [ "${GC_DEBUG:-0}" = "1" ]; then
+  source "$PLUGIN_ROOT/lib/debug_log.sh" 2>/dev/null
+  gc_debug_log "gc-hook invoked: event_type=$EVENT_TYPE"
+  ("$PLUGIN_ROOT/scripts/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>>"$GC_LOG_FILE") || {
+    gc_debug_log "capture-event failed: exit=$?"
+    true
+  }
+else
+  ("$PLUGIN_ROOT/scripts/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>/dev/null) || true
+fi
+
+exit 0

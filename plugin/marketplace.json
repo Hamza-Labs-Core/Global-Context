@@ -1,0 +1,34 @@
+{
+  "name": "globalcontext",
+  "display_name": "GlobalContext",
+  "version": "1.0.0",
+  "description": "Event-sourced context store for Claude Code. Captures all session events, builds projections, and enables context recovery after compaction or session changes.",
+  "repository": "https://github.com/globalcontext/globalcontext",
+  "author": "GlobalContext",
+  "license": "MIT",
+  "keywords": [
+    "context",
+    "sessions",
+    "event-sourcing",
+    "recovery",
+    "compaction"
+  ],
+  "categories": [
+    "productivity",
+    "developer-tools"
+  ],
+  "install": {
+    "type": "git",
+    "url": "https://github.com/globalcontext/globalcontext.git",
+    "path": "plugin"
+  },
+  "requirements": {
+    "jq": ">=1.6",
+    "bash": ">=4.0",
+    "node": ">=18.0.0"
+  },
+  "supported_os": [
+    "linux",
+    "darwin"
+  ]
+}

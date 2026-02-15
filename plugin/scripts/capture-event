@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# GlobalContext plugin capture-event v1
+# Usage: capture-event <EventType>
+# Reads JSON payload from stdin, wraps it in the event envelope, and writes
+# to the event store.
+#
+# Code paths resolve from $PLUGIN_ROOT (plugin directory).
+# Data paths resolve from $GC_ROOT (user's data store).
+set -euo pipefail
+
+EVENT_TYPE="${1:?Missing event type}"
+
+# Resolve code paths from plugin root
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source shared libraries from plugin
+source "$PLUGIN_ROOT/lib/paths.sh"
+source "$PLUGIN_ROOT/lib/sanitize.sh"
+source "$PLUGIN_ROOT/lib/session_dir.sh"
+source "$PLUGIN_ROOT/lib/atomic_write.sh"
+source "$PLUGIN_ROOT/lib/session_meta.sh"
+source "$PLUGIN_ROOT/lib/uuid.sh"
+source "$PLUGIN_ROOT/lib/timestamp.sh"
+
+# ---------------------------------------------------------------------------
+# Read JSON payload from stdin (may be empty)
+# ---------------------------------------------------------------------------
+STDIN_DATA=""
+if ! [ -t 0 ]; then
+  STDIN_DATA="$(cat)"
+fi
+
+# If stdin is empty or not valid JSON, use empty object
+if [ -z "$STDIN_DATA" ] || ! echo "$STDIN_DATA" | jq empty 2>/dev/null; then
+  STDIN_DATA="{}"
+fi
+
+# ---------------------------------------------------------------------------
+# Extract session_id from the payload or environment
+# ---------------------------------------------------------------------------
+SESSION_ID="$(echo "$STDIN_DATA" | jq -r '.session_id // empty' 2>/dev/null)"
+if [ -z "$SESSION_ID" ]; then
+  SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
+fi
+
+# ---------------------------------------------------------------------------
+# Extract or derive project_dir and project_id
+# ---------------------------------------------------------------------------
+PROJECT_DIR="$(echo "$STDIN_DATA" | jq -r '.project_dir // empty' 2>/dev/null)"
+if [ -z "$PROJECT_DIR" ]; then
+  PROJECT_DIR="${GC_PROJECT_DIR:-$PWD}"
+fi
+
+PROJECT_ID="$(gc_derive_project_id "$PROJECT_DIR")"
+
+# ---------------------------------------------------------------------------
+# Sanitize session_id
+# ---------------------------------------------------------------------------
+SANITIZED_SESSION_ID="$(gc_sanitize_session_id "$SESSION_ID")"
+
+# ---------------------------------------------------------------------------
+# Ensure session directory exists
+# ---------------------------------------------------------------------------
+SESSION_DIR="$(gc_ensure_session_dir "$PROJECT_ID" "$SANITIZED_SESSION_ID")"
+
+# ---------------------------------------------------------------------------
+# Acquire flock, determine sequence, write event
+# ---------------------------------------------------------------------------
+LOCK_FILE="$SESSION_DIR/.lock"
+
+_gc_acquire_lock() {
+  if command -v flock &>/dev/null; then
+    exec 9>"$LOCK_FILE"
+    flock -w 5 9
+  else
+    # Portable mkdir-based lock fallback (atomic on all POSIX systems)
+    local lock_dir="${LOCK_FILE}.d"
+    local deadline=$(( $(date +%s) + 5 ))
+    while ! mkdir "$lock_dir" 2>/dev/null; do
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        return 1
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+    # Ensure cleanup on exit
+    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    return 0
+  fi
+}
+
+_gc_release_lock() {
+  if command -v flock &>/dev/null; then
+    exec 9>&-
+  else
+    rmdir "${LOCK_FILE}.d" 2>/dev/null || true
+  fi
+}
+
+if _gc_acquire_lock; then
+  # Determine next sequence number
+  HIGHEST=0
+  for f in "$SESSION_DIR"/[0-9]*.json; do
+    [ -f "$f" ] || continue
+    BASE="$(basename "$f" .json)"
+    NUM=$((10#$BASE))
+    if (( NUM > HIGHEST )); then
+      HIGHEST=$NUM
+    fi
+  done
+  SEQUENCE=$(( HIGHEST + 1 ))
+
+  # Generate event metadata
+  EVENT_ID="$(gc_generate_uuid)"
+  TIMESTAMP="$(gc_iso_timestamp)"
+
+  # Construct envelope
+  ENVELOPE="$(jq -c -n \
+    --arg eid "$EVENT_ID" \
+    --arg etype "$EVENT_TYPE" \
+    --arg pid "$PROJECT_ID" \
+    --arg sid "$SANITIZED_SESSION_ID" \
+    --argjson seq "$SEQUENCE" \
+    --arg ts "$TIMESTAMP" \
+    --argjson data "$STDIN_DATA" \
+    '{
+      event_id: $eid,
+      event_type: $etype,
+      project_id: $pid,
+      session_id: $sid,
+      sequence: $seq,
+      timestamp: $ts,
+      data: $data
+    }')"
+
+  # Write atomically
+  PADDED_SEQ="$(printf "%06d" "$SEQUENCE")"
+  TARGET_PATH="$SESSION_DIR/${PADDED_SEQ}.json"
+  gc_atomic_write "$TARGET_PATH" "$ENVELOPE" false
+
+  # Update or create session.json
+  if [ ! -f "$SESSION_DIR/session.json" ]; then
+    gc_session_meta_create "$SESSION_DIR" "$SANITIZED_SESSION_ID" "$PROJECT_ID" \
+      "$PROJECT_DIR" "claude-code" "unknown" "$TIMESTAMP"
+  else
+    gc_session_meta_update "$SESSION_DIR" "$EVENT_TYPE" "$TIMESTAMP"
+  fi
+
+  _gc_release_lock
+else
+  _gc_release_lock
+
+  # Orphan fallback
+  EVENT_ID="$(gc_generate_uuid)"
+  TIMESTAMP="$(gc_iso_timestamp)"
+  ORPHAN_UUID="$(gc_generate_uuid)"
+
+  ENVELOPE="$(jq -c -n \
+    --arg eid "$EVENT_ID" \
+    --arg etype "$EVENT_TYPE" \
+    --arg pid "$PROJECT_ID" \
+    --arg sid "$SANITIZED_SESSION_ID" \
+    --argjson seq 0 \
+    --arg ts "$TIMESTAMP" \
+    --argjson data "$STDIN_DATA" \
+    '{
+      event_id: $eid,
+      event_type: $etype,
+      project_id: $pid,
+      session_id: $sid,
+      sequence: $seq,
+      timestamp: $ts,
+      data: $data
+    }')"
+
+  TARGET_PATH="$SESSION_DIR/orphan-${ORPHAN_UUID}.json"
+  gc_atomic_write "$TARGET_PATH" "$ENVELOPE" false
+fi
+
+exit 0
