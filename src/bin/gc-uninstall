@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# gc-uninstall -- Uninstall GlobalContext.
+# Soft uninstall: remove hooks, bin/, lib/, VERSION. Preserve events/ and config.json.
+# Purge: remove everything including event data.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Resolve lib directory and source dependencies
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When running from installed location, lib is at ../lib
+# When running from source, lib is at ../lib
+LIB_DIR="$SCRIPT_DIR/../lib"
+if [ -f "$LIB_DIR/paths.sh" ]; then
+  # shellcheck source=../lib/paths.sh
+  source "$LIB_DIR/paths.sh"
+else
+  # Fallback: try installed location
+  GC_ROOT="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+  if [ -f "$GC_ROOT/lib/paths.sh" ]; then
+    source "$GC_ROOT/lib/paths.sh"
+  else
+    # Bare minimum
+    GC_ROOT="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Parse flags
+# ---------------------------------------------------------------------------
+OPT_PURGE=false
+OPT_FORCE=false
+OPT_DRY_RUN=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --purge)
+      OPT_PURGE=true
+      shift
+      ;;
+    --force)
+      OPT_FORCE=true
+      shift
+      ;;
+    --dry-run)
+      OPT_DRY_RUN=true
+      shift
+      ;;
+    --help|-h)
+      echo "Usage: gc-uninstall [--purge] [--force] [--dry-run]"
+      echo ""
+      echo "Options:"
+      echo "  --purge    Remove everything including event data"
+      echo "  --force    Skip confirmation prompt"
+      echo "  --dry-run  Print what would be removed without making changes"
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option '$1'" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Resolve GC_BASE
+# ---------------------------------------------------------------------------
+GC_BASE="${GC_ROOT:-${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}}"
+
+# ---------------------------------------------------------------------------
+# Check if installed
+# ---------------------------------------------------------------------------
+if [ ! -d "$GC_BASE" ]; then
+  echo "GlobalContext is not installed at $GC_BASE."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Compute summary stats
+# ---------------------------------------------------------------------------
+event_count=0
+session_count=0
+total_size="unknown"
+
+if [ -d "$GC_BASE/events" ]; then
+  event_count=$(find "$GC_BASE/events" -name '[0-9]*.json' 2>/dev/null | wc -l || echo 0)
+  session_count=$(find "$GC_BASE/events" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l || echo 0)
+fi
+total_size=$(du -sh "$GC_BASE" 2>/dev/null | cut -f1 || echo "unknown")
+
+# ---------------------------------------------------------------------------
+# Print what will be removed
+# ---------------------------------------------------------------------------
+echo "GlobalContext Uninstall"
+echo "======================"
+echo "Store: $GC_BASE"
+echo ""
+echo "Will remove:"
+echo "  - Hooks in ~/.claude/settings.json"
+echo "  - Scripts in $GC_BASE/bin/ and $GC_BASE/lib/"
+echo "  - $GC_BASE/VERSION"
+if [[ "$OPT_PURGE" == "true" ]]; then
+  echo "  - ALL DATA in $GC_BASE/events/ and $GC_BASE/projections/"
+  echo "  - $GC_BASE/config.json"
+  echo "  - $GC_BASE/logs/ (if exists)"
+  echo "  - $GC_BASE/ (root directory)"
+else
+  echo ""
+  echo "Preserved:"
+  echo "  - events/ ($event_count events across $session_count sessions)"
+  echo "  - projections/"
+  echo "  - config.json"
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# Dry run
+# ---------------------------------------------------------------------------
+if [[ "$OPT_DRY_RUN" == "true" ]]; then
+  echo "Dry run: no changes made."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Purge confirmation
+# ---------------------------------------------------------------------------
+if [[ "$OPT_PURGE" == "true" && "$OPT_FORCE" != "true" ]]; then
+  echo "WARNING: This will permanently delete all captured event data."
+  echo "  Sessions: $session_count, Events: $event_count, Size: $total_size"
+  echo -n "Type 'yes' to confirm: "
+  read -r confirmation
+  if [ "$confirmation" != "yes" ]; then
+    echo "Aborted."
+    exit 0
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1: Remove hooks from settings.json
+# ---------------------------------------------------------------------------
+echo "Removing hooks..."
+if [ -x "$GC_BASE/bin/gc-install-hooks" ]; then
+  if "$GC_BASE/bin/gc-install-hooks" uninstall 2>/dev/null; then
+    echo "  Hooks removed from ~/.claude/settings.json"
+  else
+    echo "  WARNING: Hook removal failed. You may need to edit ~/.claude/settings.json manually." >&2
+  fi
+else
+  echo "  INFO: gc-install-hooks not available. Hooks may need manual removal from ~/.claude/settings.json."
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: Remove scripts
+# ---------------------------------------------------------------------------
+echo "Removing scripts..."
+if [ -d "$GC_BASE/bin" ]; then
+  rm -rf "$GC_BASE/bin"
+  echo "  Removed $GC_BASE/bin/"
+fi
+if [ -d "$GC_BASE/lib" ]; then
+  rm -rf "$GC_BASE/lib"
+  echo "  Removed $GC_BASE/lib/"
+fi
+if [ -f "$GC_BASE/VERSION" ]; then
+  rm -f "$GC_BASE/VERSION"
+  echo "  Removed $GC_BASE/VERSION"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: If purge, remove data
+# ---------------------------------------------------------------------------
+if [[ "$OPT_PURGE" == "true" ]]; then
+  echo "Removing data..."
+  if [ -d "$GC_BASE/events" ]; then
+    rm -rf "$GC_BASE/events"
+    echo "  Removed $GC_BASE/events/"
+  fi
+  if [ -d "$GC_BASE/projections" ]; then
+    rm -rf "$GC_BASE/projections"
+    echo "  Removed $GC_BASE/projections/"
+  fi
+  if [ -f "$GC_BASE/config.json" ]; then
+    rm -f "$GC_BASE/config.json"
+    echo "  Removed $GC_BASE/config.json"
+  fi
+  if [ -d "$GC_BASE/logs" ]; then
+    rm -rf "$GC_BASE/logs"
+    echo "  Removed $GC_BASE/logs/"
+  fi
+  # Remove root if now empty
+  rmdir "$GC_BASE" 2>/dev/null && echo "  Removed $GC_BASE/" || true
+fi
+
+# ---------------------------------------------------------------------------
+# Print summary
+# ---------------------------------------------------------------------------
+echo ""
+echo "Uninstall complete."
+if [[ "$OPT_PURGE" == "true" ]]; then
+  echo "  Data deleted: $session_count sessions, $event_count events, $total_size"
+else
+  echo "  Data preserved at $GC_BASE/ (events/, projections/, config.json)"
+  echo "  To completely remove all data: gc-uninstall --purge"
+fi
+
+exit 0
