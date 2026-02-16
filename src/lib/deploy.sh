@@ -42,8 +42,29 @@ gc_deploy_files() {
   local target_dir="$2"
   local dry_run="${3:-false}"
 
+  # Resolve real paths to detect same-directory installs
+  local real_src real_target
+  real_src="$(cd "$src_dir" && pwd -P)"
+  real_target="$(cd "$target_dir" 2>/dev/null && pwd -P || echo "$target_dir")"
+  local same_dir=false
+  if [ "$real_src" = "$real_target" ]; then
+    same_dir=true
+  fi
+
   local bin_count=0
   local lib_count=0
+
+  # Helper: copy file only if source != destination
+  _gc_deploy_cp() {
+    local src_file="$1" dst_file="$2"
+    local real_src_file real_dst_file
+    real_src_file="$(realpath "$src_file" 2>/dev/null || echo "$src_file")"
+    real_dst_file="$(realpath "$dst_file" 2>/dev/null || echo "$dst_file")"
+    if [ "$real_src_file" = "$real_dst_file" ]; then
+      return 0  # same file, skip copy
+    fi
+    cp "$src_file" "$dst_file"
+  }
 
   # Deploy bin/ scripts
   mkdir -p "$target_dir/bin"
@@ -54,7 +75,7 @@ gc_deploy_files() {
     if [ "$dry_run" = "true" ]; then
       echo "  Would install: bin/$name"
     else
-      cp "$script" "$target_dir/bin/$name"
+      _gc_deploy_cp "$script" "$target_dir/bin/$name"
       chmod 755 "$target_dir/bin/$name"
       echo "  bin/$name    installed"
     fi
@@ -70,7 +91,7 @@ gc_deploy_files() {
     if [ "$dry_run" = "true" ]; then
       echo "  Would install: lib/$name"
     else
-      cp "$module" "$target_dir/lib/$name"
+      _gc_deploy_cp "$module" "$target_dir/lib/$name"
       chmod 644 "$target_dir/lib/$name"
     fi
     lib_count=$((lib_count + 1))
@@ -87,7 +108,7 @@ gc_deploy_files() {
       if [ "$dry_run" = "true" ]; then
         echo "  Would install: bin/$script"
       else
-        cp "$src_dir/$script" "$target_dir/bin/$script"
+        _gc_deploy_cp "$src_dir/$script" "$target_dir/bin/$script"
         chmod 755 "$target_dir/bin/$script"
         echo "  bin/$script    installed"
       fi
@@ -99,7 +120,7 @@ gc_deploy_files() {
     if [ "$dry_run" = "true" ]; then
       echo "  Would install: lib/hook-config.json"
     else
-      cp "$src_dir/hook-config.json" "$target_dir/lib/hook-config.json"
+      _gc_deploy_cp "$src_dir/hook-config.json" "$target_dir/lib/hook-config.json"
       chmod 644 "$target_dir/lib/hook-config.json"
       echo "  lib/hook-config.json    installed"
     fi

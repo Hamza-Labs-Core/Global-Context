@@ -24,6 +24,8 @@ CLAUDE_SETTINGS_FILE="${CLAUDE_SETTINGS_DIR}/settings.json"
 # Hook config file location: try next to this script first, then installed location
 if [ -f "$SCRIPT_DIR/hook-config.json" ]; then
   HOOK_CONFIG="$SCRIPT_DIR/hook-config.json"
+elif [ -f "$GC_BASE/lib/hook-config.json" ]; then
+  HOOK_CONFIG="$GC_BASE/lib/hook-config.json"
 elif [ -f "$GC_BASE/etc/hook-config.json" ]; then
   HOOK_CONFIG="$GC_BASE/etc/hook-config.json"
 else

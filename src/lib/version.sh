@@ -22,9 +22,12 @@ gc_get_installed_version() {
 # ---------------------------------------------------------------------------
 gc_get_available_version() {
   local src_dir="$1"
+  # Try repo layout first (src/../VERSION), then installed layout (store/VERSION)
   local version_file="$src_dir/../VERSION"
   if [ -f "$version_file" ]; then
     tr -d '[:space:]' < "$version_file"
+  elif [ -f "$src_dir/VERSION" ]; then
+    tr -d '[:space:]' < "$src_dir/VERSION"
   else
     echo "unknown"
   fi

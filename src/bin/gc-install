@@ -257,6 +257,9 @@ _gc_add_to_path() {
     return 0
   fi
 
+  # Ensure parent directory exists
+  mkdir -p "$(dirname "$shell_rc")"
+
   # Append
   echo "" >> "$shell_rc"
   echo "# GlobalContext CLI tools" >> "$shell_rc"

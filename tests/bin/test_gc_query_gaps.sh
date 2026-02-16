@@ -101,7 +101,9 @@ setup_store
 # sess-ended: ended session, project 1
 create_session "$PROJECT_ID" "sess-ended" "2026-02-14T10:00:00Z" 5 "2026-02-14T11:00:00Z" "Fix auth bug"
 # sess-active: active session (no ended_at), project 1
-create_session "$PROJECT_ID" "sess-active" "2026-02-15T10:00:00Z" 3 "" "Write tests"
+# Use a recent timestamp (1 hour ago) to avoid orphan detection (>24h = orphaned)
+RECENT_TS="$(date -u -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null || date -u -v-1H '+%Y-%m-%dT%H:%M:%S.000Z')"
+create_session "$PROJECT_ID" "sess-active" "$RECENT_TS" 3 "" "Write tests"
 # sess-other: session in project 2
 create_session "$PROJECT_ID_2" "sess-other" "2026-02-13T10:00:00Z" 4 "2026-02-13T11:00:00Z" "Deploy feature"
 
