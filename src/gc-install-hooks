@@ -112,7 +112,7 @@ cmd_install() {
     # Merge: remove old gc-hook entries, append new one
     current_json=$(echo "$current_json" | jq --argjson new_hook "$hook_entry" --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
       '.hooks = (.hooks // {}) |
-       .hooks[$hook_name] = ([(.hooks[$hook_name] // [])[] | select(.command | contains($identifier) | not)] + [$new_hook])')
+       .hooks[$hook_name] = ([(.hooks[$hook_name] // [])[] | select((.command // "") | contains($identifier) | not)] + [$new_hook])')
   done
 
   # Write with 2-space indentation
@@ -153,7 +153,7 @@ cmd_uninstall() {
   cleaned_json=$(jq --arg identifier "$HOOK_IDENTIFIER" '
     if .hooks then
       .hooks |= with_entries(
-        .value |= [.[] | select(.command | contains($identifier) | not)]
+        .value |= [.[] | select((.command // "") | contains($identifier) | not)]
       ) |
       # Remove empty arrays
       .hooks |= with_entries(select(.value | length > 0)) |
@@ -211,7 +211,7 @@ cmd_validate() {
     # Check that at least one entry contains gc-hook
     local gc_hook_count
     gc_hook_count=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select(.command | contains($identifier))] | length' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))] | length' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$gc_hook_count" -eq 0 ]; then
       echo "FAIL: $hook_name -- no gc-hook entry found"
@@ -222,7 +222,7 @@ cmd_validate() {
     # Verify the gc-hook entry has correct timeout
     local actual_timeout
     actual_timeout=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select(.command | contains($identifier))][0].timeout' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].timeout' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$actual_timeout" != "$HOOK_TIMEOUT" ]; then
       echo "FAIL: $hook_name -- timeout is $actual_timeout, expected $HOOK_TIMEOUT"
@@ -234,7 +234,7 @@ cmd_validate() {
     local expected_async actual_async
     expected_async=$(jq -r ".hooks[\"$hook_name\"].async" "$HOOK_CONFIG")
     actual_async=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select(.command | contains($identifier))][0].async' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].async' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$actual_async" != "$expected_async" ]; then
       echo "FAIL: $hook_name -- async is $actual_async, expected $expected_async"
@@ -246,7 +246,7 @@ cmd_validate() {
     local expected_matcher actual_matcher
     expected_matcher=$(jq -r ".hooks[\"$hook_name\"].matcher" "$HOOK_CONFIG")
     actual_matcher=$(jq -r --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select(.command | contains($identifier))][0].matcher // "null"' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].matcher // "null"' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$expected_matcher" != "$actual_matcher" ]; then
       echo "FAIL: $hook_name -- matcher is '$actual_matcher', expected '$expected_matcher'"
