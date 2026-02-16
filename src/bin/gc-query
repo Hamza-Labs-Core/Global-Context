@@ -10,6 +10,7 @@
 #   sessions     List all sessions with metadata
 #   search       Search across sessions for events containing a keyword
 #   replay       Transform raw events into a human-readable narrative
+#   watch        Live event monitor (tail -f for events)
 #   doctor       End-to-end health check
 set -euo pipefail
 
@@ -60,6 +61,7 @@ _gc_query_usage() {
   echo "  search <keyword>     Search across sessions for matching events"
   echo "  status               Show store health and statistics"
   echo "  store-size           Report total event count, size, oldest/newest"
+  echo "  watch [session-id]   Live event monitor (Ctrl+C to stop)"
   echo "  doctor               End-to-end health check"
   echo ""
   echo "Options:"
@@ -1168,6 +1170,206 @@ _gc_query_replay() {
 }
 
 # ---------------------------------------------------------------------------
+# watch subcommand -- live event monitor
+# ---------------------------------------------------------------------------
+_gc_format_event_line() {
+  local event_content="$1"
+  local etype
+  etype="$(printf '%s' "$event_content" | jq -r '.event_type // "Unknown"')"
+  local seq_num
+  seq_num="$(printf '%s' "$event_content" | jq -r '.sequence // 0')"
+  local ts
+  ts="$(printf '%s' "$event_content" | jq -r '.timestamp // ""' | cut -c12-19)"
+
+  local detail=""
+  case "$etype" in
+    SessionStarted)
+      local cwd
+      cwd="$(printf '%s' "$event_content" | jq -r '.data.cwd // ""')"
+      detail="in ${cwd}"
+      ;;
+    UserPromptReceived)
+      local prompt
+      prompt="$(printf '%s' "$event_content" | jq -r '.data.prompt // ""')"
+      [[ ${#prompt} -gt 80 ]] && prompt="${prompt:0:77}..."
+      detail="\"${prompt}\""
+      ;;
+    ToolCallRequested)
+      local tool_name tool_target
+      tool_name="$(printf '%s' "$event_content" | jq -r '.data.tool_name // "?"')"
+      tool_target="$(printf '%s' "$event_content" | jq -r '
+        .data.tool_input.file_path //
+        .data.tool_input.notebook_path //
+        .data.tool_input.command //
+        .data.tool_input.pattern //
+        empty' | head -c 60)"
+      detail="${tool_name}"
+      [[ -n "$tool_target" ]] && detail="${detail} ${tool_target}"
+      ;;
+    ToolCallCompleted)
+      local tool_name
+      tool_name="$(printf '%s' "$event_content" | jq -r '.data.tool_name // "?"')"
+      detail="${tool_name} OK"
+      ;;
+    ToolCallFailed)
+      local tool_name err
+      tool_name="$(printf '%s' "$event_content" | jq -r '.data.tool_name // "?"')"
+      err="$(printf '%s' "$event_content" | jq -r '.data.error // ""' | head -c 40)"
+      detail="${tool_name} FAILED: ${err}"
+      ;;
+    AgentSpawned)
+      detail="$(printf '%s' "$event_content" | jq -r '.data.agent_type // .data.description // ""')"
+      ;;
+    AgentCompleted)
+      detail="$(printf '%s' "$event_content" | jq -r '.data.agent_type // ""') done"
+      ;;
+    TurnCompleted)
+      detail=""
+      ;;
+    CompactionTriggered)
+      detail="context window compacted"
+      ;;
+    SessionEnded)
+      detail=""
+      ;;
+    *)
+      detail="$(printf '%s' "$event_content" | jq -c '.data // {}' | head -c 60)"
+      ;;
+  esac
+
+  printf '%s  #%-4s  %-22s  %s\n' "$ts" "$seq_num" "$etype" "$detail"
+}
+
+_gc_query_watch() {
+  local session_id="" interval=2
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --interval|-n) [[ $# -lt 2 ]] && { echo "error: --interval requires a number" >&2; return 1; }; interval="$2"; shift 2 ;;
+      --help) echo "Usage: gc-query watch [session-id] [--interval N]"; echo ""; echo "Live monitor for events. Auto-discovers latest session if no ID given."; echo "Press Ctrl+C to stop."; return 0 ;;
+      -*) echo "error: unknown option '$1'" >&2; return 1 ;;
+      *) if [[ -z "$session_id" ]]; then session_id="$1"; else echo "error: unexpected argument '$1'" >&2; return 1; fi; shift ;;
+    esac
+  done
+
+  local project_id
+  project_id="$(_gc_current_project_id)"
+
+  # Resolve session
+  local resolved_sid
+  if [[ -n "$session_id" ]]; then
+    resolved_sid="$(resolve_session_id "$project_id" "$session_id")" || return $?
+  else
+    resolved_sid="$(resolve_latest_session "$project_id" 2>/dev/null)" || {
+      echo "error: no sessions found. Start a Claude Code session first." >&2
+      return 3
+    }
+  fi
+
+  local events_dir="$GC_EVENTS_DIR/$project_id/$resolved_sid"
+  if [[ ! -d "$events_dir" ]]; then
+    echo "error: no events directory for session '$resolved_sid'" >&2
+    return 3
+  fi
+
+  echo "GlobalContext Watch"
+  echo "  Session:  ${resolved_sid}"
+  echo "  Project:  ${project_id}"
+  echo "  Interval: ${interval}s"
+  echo "  Press Ctrl+C to stop"
+  echo ""
+  printf '%-8s  %-5s  %-22s  %s\n' "TIME" "SEQ" "EVENT" "DETAIL"
+  printf '%-8s  %-5s  %-22s  %s\n' "--------" "-----" "----------------------" "------"
+
+  local last_seq=0
+  local total_events=0 tool_calls=0 failures=0
+
+  # Print existing events first
+  for event_file in "$events_dir"/[0-9]*.json; do
+    [[ -f "$event_file" ]] || continue
+    local base seq_num
+    base="$(basename "$event_file" .json)"
+    # Strip non-numeric suffix (lockless writes: 000001_a3f7.json)
+    base="${base%%_*}"
+    seq_num=$((10#$base))
+    [[ "$seq_num" -gt "$last_seq" ]] && last_seq="$seq_num"
+    total_events=$((total_events + 1))
+
+    local content
+    content="$(cat "$event_file" 2>/dev/null)" || continue
+    printf '%s' "$content" | jq empty 2>/dev/null || continue
+
+    local etype
+    etype="$(printf '%s' "$content" | jq -r '.event_type // ""')"
+    [[ "$etype" == "ToolCallRequested" ]] && tool_calls=$((tool_calls + 1))
+    [[ "$etype" == "ToolCallFailed" ]] && failures=$((failures + 1))
+
+    _gc_format_event_line "$content"
+  done
+
+  echo ""
+  echo "--- Caught up ($total_events events, $tool_calls tool calls). Watching for new events... ---"
+  echo ""
+
+  # Poll loop
+  while true; do
+    sleep "$interval"
+
+    local new_found=false
+    for event_file in "$events_dir"/[0-9]*.json; do
+      [[ -f "$event_file" ]] || continue
+      local base seq_num
+      base="$(basename "$event_file" .json)"
+      base="${base%%_*}"
+      seq_num=$((10#$base))
+
+      [[ "$seq_num" -le "$last_seq" ]] && continue
+
+      local content
+      content="$(cat "$event_file" 2>/dev/null)" || continue
+      printf '%s' "$content" | jq empty 2>/dev/null || continue
+
+      local etype
+      etype="$(printf '%s' "$content" | jq -r '.event_type // ""')"
+      [[ "$etype" == "ToolCallRequested" ]] && tool_calls=$((tool_calls + 1))
+      [[ "$etype" == "ToolCallFailed" ]] && failures=$((failures + 1))
+      total_events=$((total_events + 1))
+
+      _gc_format_event_line "$content"
+      last_seq="$seq_num"
+      new_found=true
+
+      # If session ended, stop watching
+      if [[ "$etype" == "SessionEnded" ]]; then
+        echo ""
+        echo "--- Session ended ($total_events events, $tool_calls tool calls, $failures failures) ---"
+        return 0
+      fi
+    done
+
+    # Also check if a newer session appeared (session switch)
+    if [[ "$new_found" != "true" ]]; then
+      local current_latest
+      current_latest="$(resolve_latest_session "$project_id" 2>/dev/null)" || true
+      if [[ -n "$current_latest" && "$current_latest" != "$resolved_sid" ]]; then
+        echo ""
+        echo "--- New session detected: ${current_latest} ---"
+        echo "--- Run: gc-query watch ${current_latest} ---"
+        echo ""
+        resolved_sid="$current_latest"
+        events_dir="$GC_EVENTS_DIR/$project_id/$resolved_sid"
+        last_seq=0
+        total_events=0
+        tool_calls=0
+        failures=0
+        printf '%-8s  %-5s  %-22s  %s\n' "TIME" "SEQ" "EVENT" "DETAIL"
+        printf '%-8s  %-5s  %-22s  %s\n' "--------" "-----" "----------------------" "------"
+      fi
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # doctor subcommand (Task 19)
 # ---------------------------------------------------------------------------
 _gc_query_doctor() {
@@ -1440,6 +1642,7 @@ main() {
     sessions)   _gc_query_sessions "$@" ;;
     search)     _gc_query_search "$@" ;;
     replay)     _gc_query_replay "$@" ;;
+    watch)      _gc_query_watch "$@" ;;
     doctor)     _gc_query_doctor "$@" ;;
     --help|-h)  _gc_query_usage; return 0 ;;
     *)
