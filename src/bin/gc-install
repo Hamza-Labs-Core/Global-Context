@@ -231,8 +231,50 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 7: Print install summary
+# Step 7: Add bin/ to PATH if not already present
 # ---------------------------------------------------------------------------
+_gc_add_to_path() {
+  local bin_dir="$1"
+  local path_line="export PATH=\"$bin_dir:\$PATH\""
+
+  # Check if already on PATH
+  if echo "$PATH" | tr ':' '\n' | grep -qxF "$bin_dir"; then
+    echo "  PATH already includes $bin_dir"
+    return 0
+  fi
+
+  # Find the right shell config file
+  local shell_rc=""
+  case "${SHELL:-/bin/bash}" in
+    */zsh)  shell_rc="$HOME/.zshrc" ;;
+    */bash) shell_rc="$HOME/.bashrc" ;;
+    *)      shell_rc="$HOME/.profile" ;;
+  esac
+
+  # Check if the line is already in the file
+  if [ -f "$shell_rc" ] && grep -qF "$bin_dir" "$shell_rc" 2>/dev/null; then
+    echo "  PATH entry already in $shell_rc"
+    return 0
+  fi
+
+  # Append
+  echo "" >> "$shell_rc"
+  echo "# GlobalContext CLI tools" >> "$shell_rc"
+  echo "$path_line" >> "$shell_rc"
+  echo "  Added $bin_dir to PATH in $shell_rc"
+
+  # Also export for the current install session
+  export PATH="$bin_dir:$PATH"
+}
+
+if [[ "$OPT_DRY_RUN" != "true" ]]; then
+  _gc_add_to_path "$GC_BASE/bin"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 8: Print install summary
+# ---------------------------------------------------------------------------
+echo ""
 echo "Installation complete!"
 echo "  Version: ${AVAILABLE_VERSION}"
 echo "  Store:   ${GC_BASE}"
@@ -243,7 +285,7 @@ else
 fi
 echo ""
 echo "To get started:"
-echo "  Start a Claude Code session -- events will be captured automatically."
-echo "  Run: gc-query store-size  -- check store stats"
+echo "  Start a new shell (or run: source ~/.bashrc)"
+echo "  Then: gc-query store-size"
 
 exit 0
