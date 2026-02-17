@@ -259,8 +259,37 @@ format_markdown() {
     json="$(cat)"
   fi
 
+  # Normalize both real projection and degraded context into a common shape
   local data
-  data="$(printf '%s' "$json" | jq -r '.data // .')"
+  data="$(printf '%s' "$json" | jq '
+    if .data then
+      # Degraded/minimal projection path -- prompts may already be in .data
+      .data + {prompts: (.data.prompts // [])}
+    else {
+      session_id: (._session_id // .session.id // "unknown"),
+      project_id: (._project_id // "unknown"),
+      started_at: (.session.started_at // "unknown"),
+      last_event_at: (.session.ended_at // "unknown"),
+      event_count: (.session.event_count // ._last_sequence // 0),
+      last_prompt: ((.prompts // [])[-1].prompt // ""),
+      prompts: (.prompts // []),
+      ended_at: (.session.ended_at // "in progress"),
+      previous_session_id: (.session.previous_session_id // null),
+      actions: [(.key_tool_calls // [])[] | {
+        tool_name: .tool_name,
+        target: .input_summary,
+        result_summary: .output_summary
+      }],
+      files_modified: [(.files_modified // [])[] | {
+        path: .path,
+        operations: ((.operations // []) | join(", ")),
+        last_action: (.last_operation // "unknown")
+      }],
+      decisions: [],
+      last_state: (.last_state.working_on // null)
+    }
+    end
+  ')"
 
   local session_id project_id started_at last_event_at event_count
   local last_prompt ended_at previous_session_id
@@ -289,9 +318,24 @@ format_markdown() {
   echo ""
 
   # Section 2: What Was Being Worked On
+  local prompts_count
+  prompts_count="$(printf '%s' "$data" | jq -r '.prompts | length // 0')"
+
   echo "## What Was Being Worked On"
   echo ""
-  if [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
+  if [[ "$prompts_count" -gt 1 ]]; then
+    # Show all prompts when there are multiple (includes interrupts)
+    local p=0
+    while [[ $p -lt $prompts_count ]]; do
+      local prompt_text
+      prompt_text="$(printf '%s' "$data" | jq -r ".prompts[$p].prompt // \"\"")"
+      if [[ -n "$prompt_text" ]]; then
+        echo "> ${prompt_text}"
+        echo ""
+      fi
+      p=$((p + 1))
+    done
+  elif [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
     echo "> ${last_prompt}"
     echo ""
   else
@@ -401,7 +445,28 @@ format_text() {
   fi
 
   local data
-  data="$(printf '%s' "$json" | jq -r '.data // .')"
+  data="$(printf '%s' "$json" | jq '
+    if .data then
+      .data + {prompts: (.data.prompts // [])}
+    else {
+      session_id: (._session_id // .session.id // "unknown"),
+      project_id: (._project_id // "unknown"),
+      started_at: (.session.started_at // "unknown"),
+      last_event_at: (.session.ended_at // "unknown"),
+      event_count: (.session.event_count // ._last_sequence // 0),
+      last_prompt: ((.prompts // [])[-1].prompt // ""),
+      prompts: (.prompts // []),
+      ended_at: (.session.ended_at // "in progress"),
+      actions: [(.key_tool_calls // [])[] | {
+        tool_name: .tool_name,
+        target: .input_summary
+      }],
+      files_modified: [(.files_modified // [])[] | {
+        path: .path
+      }]
+    }
+    end
+  ')"
 
   local session_id project_id started_at last_event_at event_count last_prompt ended_at
 
@@ -421,7 +486,22 @@ format_text() {
   echo "Events: ${event_count}"
   echo ""
 
-  if [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
+  local prompts_count
+  prompts_count="$(printf '%s' "$data" | jq -r '.prompts | length // 0')"
+
+  if [[ "$prompts_count" -gt 1 ]]; then
+    echo "User Prompts:"
+    local p=0
+    while [[ $p -lt $prompts_count ]]; do
+      local prompt_text
+      prompt_text="$(printf '%s' "$data" | jq -r ".prompts[$p].prompt // \"\"")"
+      if [[ -n "$prompt_text" ]]; then
+        echo "  - ${prompt_text}"
+      fi
+      p=$((p + 1))
+    done
+    echo ""
+  elif [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
     echo "Last Prompt:"
     echo "  ${last_prompt}"
     echo ""
@@ -463,7 +543,18 @@ format_compact() {
   fi
 
   local data
-  data="$(printf '%s' "$json" | jq -r '.data // .')"
+  data="$(printf '%s' "$json" | jq '
+    if .data then .data
+    else {
+      session_id: (._session_id // .session.id // "unknown"),
+      project_id: (._project_id // "unknown"),
+      started_at: (.session.started_at // "unknown"),
+      event_count: (.session.event_count // ._last_sequence // 0),
+      last_prompt: ((.prompts // [])[-1].prompt // ""),
+      files_modified: (.files_modified // [])
+    }
+    end
+  ')"
 
   local session_id started_at project_id event_count last_prompt files_count
 

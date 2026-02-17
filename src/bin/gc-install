@@ -231,7 +231,30 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 7: Add bin/ to PATH if not already present
+# Step 7: Deploy recall skill to ~/.claude/skills/
+# ---------------------------------------------------------------------------
+_gc_deploy_skill() {
+  local skill_dir="$HOME/.claude/skills/recall"
+  local skill_src="$SRC_DIR/skills/recall/SKILL.md"
+
+  if [ ! -f "$skill_src" ]; then
+    echo "  recall skill            skipped (source not found)"
+    return 0
+  fi
+
+  mkdir -p "$skill_dir"
+  cp "$skill_src" "$skill_dir/SKILL.md"
+  echo "  recall skill            ok (~/.claude/skills/recall/)"
+}
+
+if [[ "$OPT_DRY_RUN" != "true" ]]; then
+  echo "Deploying skills..."
+  _gc_deploy_skill
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# Step 8: Add bin/ to PATH if not already present
 # ---------------------------------------------------------------------------
 _gc_add_to_path() {
   local bin_dir="$1"
@@ -275,7 +298,7 @@ if [[ "$OPT_DRY_RUN" != "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 8: Print install summary
+# Step 9: Print install summary
 # ---------------------------------------------------------------------------
 echo ""
 echo "Installation complete!"

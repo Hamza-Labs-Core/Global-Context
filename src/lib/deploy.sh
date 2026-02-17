@@ -115,6 +115,31 @@ gc_deploy_files() {
     fi
   done
 
+  # Deploy projections/ (handlers + lib .mjs modules)
+  for subdir in handlers lib; do
+    if [ -d "$src_dir/projections/$subdir" ]; then
+      mkdir -p "$target_dir/projections/$subdir"
+      local proj_count=0
+      for mjs_file in "$src_dir/projections/$subdir/"*.mjs; do
+        [ -f "$mjs_file" ] || continue
+        local name
+        name=$(basename "$mjs_file")
+        if [ "$dry_run" = "true" ]; then
+          echo "  Would install: projections/$subdir/$name"
+        else
+          _gc_deploy_cp "$mjs_file" "$target_dir/projections/$subdir/$name"
+          chmod 644 "$target_dir/projections/$subdir/$name"
+        fi
+        proj_count=$((proj_count + 1))
+      done
+      if [ "$dry_run" = "true" ]; then
+        echo "  Would install: projections/$subdir/ ($proj_count modules)"
+      else
+        echo "  projections/$subdir/ ($proj_count modules)    installed"
+      fi
+    fi
+  done
+
   # Deploy hook-config.json if it exists
   if [ -f "$src_dir/hook-config.json" ]; then
     if [ "$dry_run" = "true" ]; then

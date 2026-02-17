@@ -23,6 +23,7 @@ SEQUENCE_PAD_WIDTH=6
 # === Task 01: Base directory resolution (inline pattern -- see docs/CONVENTIONS.md) ===
 BASE_DIR="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 EVENTS_DIR="$BASE_DIR/events"
+PROJECTIONS_DIR="$BASE_DIR/projections"
 
 # === Task 10: Check jq dependency ===
 if ! command -v jq &>/dev/null; then
@@ -185,6 +186,106 @@ compute_next_sequence() {
   echo $((max_seq + 1))
 }
 
+# === Per-session session.json creation/update (Design Amendment 2) ===
+# Creates session.json on first event, updates on subsequent events.
+# Must be called within flock scope (or best-effort without flock).
+update_session_meta() {
+  local session_dir="$1"
+  local s_id="$2"
+  local p_id="$3"
+  local e_type="$4"
+  local ts="$5"
+  local hook_payload="$6"
+
+  local session_file="$session_dir/session.json"
+
+  if [ ! -f "$session_file" ]; then
+    # First event: create session.json
+    local project_dir="$PWD"
+    local source_val model_val last_prompt_val
+    source_val=$(printf '%s' "$hook_payload" | jq -r '.source // "claude-code"' 2>/dev/null) || source_val="claude-code"
+    model_val=$(printf '%s' "$hook_payload" | jq -r '.model // "unknown"' 2>/dev/null) || model_val="unknown"
+
+    jq -cn \
+      --arg sid "$s_id" \
+      --arg pid "$p_id" \
+      --arg pdir "$project_dir" \
+      --arg sat "$ts" \
+      --arg src "$source_val" \
+      --arg mdl "$model_val" \
+      --arg etype "$e_type" \
+      '{
+        session_id: $sid,
+        project_id: $pid,
+        project_dir: $pdir,
+        started_at: $sat,
+        source: $src,
+        model: $mdl,
+        event_count: 1,
+        last_event_at: $sat,
+        last_event_type: $etype,
+        last_prompt: null,
+        ended_at: null,
+        previous_session_id: null
+      }' > "$session_file" 2>/dev/null || return 0
+
+    # Update latest symlink on first event for this session
+    update_latest_symlink "$p_id" "$s_id" || true
+  else
+    # Subsequent events: update session.json
+    # Note: use cat instead of $(<file 2>/dev/null) -- bash built-in file read
+    # returns empty inside functions when trap 'exit 0' ERR EXIT is active.
+    local current
+    current=$(cat "$session_file" 2>/dev/null) || return 0
+    [ -z "$current" ] && return 0
+
+    local updated
+    updated=$(printf '%s' "$current" | jq -c \
+      --arg etype "$e_type" \
+      --arg ts "$ts" \
+      '.event_count += 1 | .last_event_at = $ts | .last_event_type = $etype' 2>/dev/null) || return 0
+    [ -z "$updated" ] && return 0
+
+    # Conditional updates based on event_type
+    if [ "$e_type" = "UserPromptReceived" ]; then
+      local prompt_text
+      prompt_text=$(printf '%s' "$hook_payload" | jq -r '.message // .prompt // empty' 2>/dev/null) || true
+      if [ -n "$prompt_text" ]; then
+        updated=$(printf '%s' "$updated" | jq -c --arg lp "$prompt_text" '.last_prompt = $lp' 2>/dev/null) || true
+      fi
+    fi
+
+    if [ "$e_type" = "SessionEnded" ]; then
+      updated=$(printf '%s' "$updated" | jq -c --arg ts "$ts" '.ended_at = $ts' 2>/dev/null) || true
+    fi
+
+    [ -z "$updated" ] && return 0
+    printf '%s\n' "$updated" > "$session_file" 2>/dev/null || return 0
+  fi
+}
+
+# === Per-project latest symlink (Design Amendment 3) ===
+# Updates projections/{project-id}/latest -> session-id.
+update_latest_symlink() {
+  local p_id="$1"
+  local s_id="$2"
+
+  local proj_dir="$PROJECTIONS_DIR/$p_id"
+  mkdir -p "$proj_dir" 2>/dev/null || return 0
+
+  local symlink_path="$proj_dir/latest"
+  local tmp_symlink="$proj_dir/.latest.tmp.$$"
+
+  # Linux: create temp symlink, then mv -fT for atomic rename
+  # macOS: ln -sfn atomically replaces the symlink
+  if [ "$(uname -s)" = "Darwin" ]; then
+    ln -sfn "$s_id" "$symlink_path" 2>/dev/null || true
+  else
+    ln -s "$s_id" "$tmp_symlink" 2>/dev/null || return 0
+    mv -fT "$tmp_symlink" "$symlink_path" 2>/dev/null || { rm -f "$tmp_symlink" 2>/dev/null; true; }
+  fi
+}
+
 # === Task 08: Extract session_id and build envelope ===
 # First jq call: extract session_id from payload
 malformed_json=false
@@ -265,6 +366,9 @@ if [ "$has_flock" = true ]; then
     target_file="$SESSION_DIR/${padded}.json"
     atomic_write "$target_file" "$envelope_json" "$event_type"
 
+    # Update session.json within flock scope (Amendment 2)
+    update_session_meta "$SESSION_DIR" "$session_id" "$project_id" "$event_type" "$timestamp" "$payload" || true
+
   ) 200>"$LOCK_FILE"
 else
   # No flock: best-effort write with random suffix to mitigate collisions
@@ -303,6 +407,9 @@ else
 
   target_file="$SESSION_DIR/${padded}_${random_suffix}.json"
   atomic_write "$target_file" "$envelope_json" "$event_type"
+
+  # Update session.json best-effort without flock (Amendment 2)
+  update_session_meta "$SESSION_DIR" "$session_id" "$project_id" "$event_type" "$timestamp" "$payload" || true
 fi
 
 exit 0

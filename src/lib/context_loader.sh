@@ -57,7 +57,7 @@ build_context_if_needed() {
   # Try calling the project CLI if it exists
   local project_bin="$GC_BIN_DIR/project"
   if [[ -x "$project_bin" ]]; then
-    "$project_bin" context "$project_id" "$session_id" 2>/dev/null || true
+    "$project_bin" context "$session_id" --project "$project_id" >/dev/null 2>/dev/null || true
     return 0
   fi
 
@@ -76,6 +76,7 @@ _build_degraded_context() {
   local session_file="$events_dir/session.json"
 
   local started_at="" last_prompt="" event_count=0 last_event_at="" previous_session_id=""
+  local prompts="[]"
 
   if [[ -f "$session_file" ]]; then
     started_at="$(jq -r '.started_at // empty' "$session_file" 2>/dev/null)"
@@ -85,12 +86,30 @@ _build_degraded_context() {
     previous_session_id="$(jq -r '.previous_session_id // empty' "$session_file" 2>/dev/null)"
   fi
 
-  # Count events from files if session.json didn't have event_count
-  if [[ "$event_count" -eq 0 ]] && [[ -d "$events_dir" ]]; then
+  # Scan events for prompts and count
+  if [[ -d "$events_dir" ]]; then
+    local file_count=0
     for f in "$events_dir"/[0-9]*.json; do
       [[ -f "$f" ]] || continue
-      event_count=$((event_count + 1))
+      file_count=$((file_count + 1))
+
+      local etype
+      etype="$(jq -r '.event_type // empty' "$f" 2>/dev/null)" || continue
+      if [[ "$etype" == "UserPromptReceived" ]]; then
+        local prompt_text seq_num base
+        prompt_text="$(jq -r '.data.prompt // .data.message // empty' "$f" 2>/dev/null)" || true
+        base="$(basename "$f" .json)"
+        seq_num=$((10#$base))
+        if [[ -n "$prompt_text" ]]; then
+          last_prompt="$prompt_text"
+          prompts="$(printf '%s' "$prompts" | jq --arg p "$prompt_text" --argjson seq "$seq_num" '. + [{prompt: $p, sequence: $seq}]')"
+        fi
+      fi
     done
+    # Use file count if session.json had 0
+    if [[ "$event_count" -eq 0 ]]; then
+      event_count=$file_count
+    fi
   fi
 
   local prev_json="null"
@@ -102,6 +121,7 @@ _build_degraded_context() {
     --arg started_at "${started_at:-unknown}" \
     --arg last_event_at "${last_event_at:-unknown}" \
     --arg last_prompt "${last_prompt:-}" \
+    --argjson prompts "$prompts" \
     --argjson event_count "$event_count" \
     --argjson previous_session_id "$prev_json" \
     '{
@@ -119,6 +139,7 @@ _build_degraded_context() {
         "last_event_at": $last_event_at,
         "event_count": $event_count,
         "last_prompt": $last_prompt,
+        "prompts": $prompts,
         "previous_session_id": $previous_session_id,
         "actions": [],
         "files_modified": [],
@@ -143,7 +164,7 @@ _build_minimal_projection() {
 
   local event_count=0 last_seq=0
   local started_at="" last_event_at="" last_prompt="" previous_session_id=""
-  local actions="[]" files_modified="[]"
+  local actions="[]" files_modified="[]" prompts="[]"
 
   # Read previous_session_id from session.json if available
   local session_file="$events_dir/session.json"
@@ -172,7 +193,12 @@ _build_minimal_projection() {
     last_event_at="$ts"
 
     if [[ "$etype" == "UserPromptReceived" ]]; then
-      last_prompt="$(jq -r '.data.prompt // empty' "$f" 2>/dev/null)" || true
+      local prompt_text
+      prompt_text="$(jq -r '.data.prompt // .data.message // empty' "$f" 2>/dev/null)" || true
+      if [[ -n "$prompt_text" ]]; then
+        last_prompt="$prompt_text"
+        prompts="$(printf '%s' "$prompts" | jq --arg p "$prompt_text" --argjson seq "$seq_num" '. + [{prompt: $p, sequence: $seq}]')"
+      fi
     fi
   done
 
@@ -191,6 +217,7 @@ _build_minimal_projection() {
     --arg started_at "${started_at:-unknown}" \
     --arg last_event_at "${last_event_at:-unknown}" \
     --arg last_prompt "${last_prompt:-}" \
+    --argjson prompts "$prompts" \
     --argjson actions "$actions" \
     --argjson files_modified "$files_modified" \
     --argjson previous_session_id "$prev_json" \
@@ -208,6 +235,7 @@ _build_minimal_projection() {
         "last_event_at": $last_event_at,
         "event_count": $event_count,
         "last_prompt": $last_prompt,
+        "prompts": $prompts,
         "previous_session_id": $previous_session_id,
         "actions": $actions,
         "files_modified": $files_modified,

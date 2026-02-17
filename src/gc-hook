@@ -5,32 +5,52 @@
 # GUARANTEES: exit 0, zero stdout, zero stderr.
 # NOTE: intentionally no set -euo pipefail here -- the exit-0 guarantee
 # takes priority. If $1 is missing we still must exit 0.
+#
+# IMPORTANT: capture-event runs in the background (fire-and-forget).
+# Synchronous execution blocked Claude Code's prompt pipeline and caused
+# UserPromptSubmit to loop during plan mode exit. See events 218-242 in
+# session e0a40ac6 for the incident. Backgrounding ensures the hook
+# returns instantly (exit 0) so Claude Code never retries/re-fires.
 
 EVENT_TYPE="${1:-UnknownEvent}"
 
 # Resolve storage path: CLAUDE_CONTEXT_PATH env var, or default
 GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 
-# Debug logging support (GC_DEBUG=1 enables)
+# Read stdin eagerly into a variable. Using </dev/stdin in a subshell is
+# unreliable with pipe-based stdin from Claude Code (silent empty reads).
+PAYLOAD=$(cat 2>/dev/null) || true
+
+# Fire-and-forget: run capture-event in background to avoid blocking
+# Claude Code's event pipeline. The flock in capture-event still
+# serializes concurrent writes, so ordering is preserved.
 if [ "${GC_DEBUG:-0}" = "1" ]; then
   # Source debug helper if available; fail silently if not
   source "$GC_BASE/lib/debug_log.sh" 2>/dev/null || true
   if type gc_debug_log &>/dev/null; then
-    gc_debug_log "gc-hook invoked: event_type=$EVENT_TYPE"
-    ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") || {
-      gc_debug_log "capture-event failed: exit=$?"
-      true
-    }
+    gc_debug_log "gc-hook invoked: event_type=$EVENT_TYPE payload_len=${#PAYLOAD}"
+    (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") &
   else
-    ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>/dev/null) || true
+    (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
   fi
 else
-  # Run capture-event in a subshell to isolate all side effects.
-  # - stdin is piped through from Claude Code
-  # - stdout is suppressed (no output that Claude Code could interpret)
-  # - stderr is suppressed (no error leaks)
-  # - exit code is ignored (|| true)
-  ("$GC_BASE/bin/capture-event" "$EVENT_TYPE" </dev/stdin >/dev/null 2>/dev/null) || true
+  (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
 fi
+
+# Auto-launch dashboard on SessionStarted if not already running
+if [ "$EVENT_TYPE" = "SessionStarted" ]; then
+  _gc_dashboard_running() {
+    local pidfile="$GC_BASE/.dashboard.pid"
+    [ -f "$pidfile" ] || return 1
+    local pid
+    pid=$(head -1 "$pidfile" 2>/dev/null) || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  }
+  if ! _gc_dashboard_running; then
+    (nohup "$GC_BASE/bin/gc-dashboard" >/dev/null 2>&1 &)
+  fi
+fi
+
+disown 2>/dev/null || true
 
 exit 0

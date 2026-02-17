@@ -51,6 +51,7 @@ _gc_query_usage() {
   echo ""
   echo "Subcommands:"
   echo "  last                 Get context from the most recent session"
+  echo "  previous             Get context from the most recent ended session"
   echo "  session <id>         Get context from a specific session"
   echo "  sessions             List all sessions with metadata"
   echo "  events <session-id>  Raw event access for a session"
@@ -489,6 +490,65 @@ _gc_query_tail() {
   fi
 
   _gc_query_events "$resolved_sid" --from "$from_seq" --format "$format"
+}
+
+# ---------------------------------------------------------------------------
+# previous subcommand -- most recent ended session (skips active)
+# ---------------------------------------------------------------------------
+_gc_query_previous() {
+  local format="markdown"
+  local include_parent=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format) [[ $# -lt 2 ]] && { echo "error: --format requires an argument" >&2; return 1; }; format="$2"; shift 2 ;;
+      --include-parent) include_parent=true; shift ;;
+      --help) echo "Usage: gc-query previous [--format json|text|markdown|compact] [--include-parent]"; echo ""; echo "Show context from the most recent ended session (skips active sessions)."; return 0 ;;
+      *) echo "error: unknown option '$1'" >&2; return 1 ;;
+    esac
+  done
+
+  local project_id
+  project_id="$(_gc_current_project_id)"
+
+  local project_events_dir="$GC_EVENTS_DIR/$project_id"
+  if [[ ! -d "$project_events_dir" ]]; then
+    echo "No sessions found." >&2
+    return 3
+  fi
+
+  # Find the most recent ended session by scanning session dirs
+  local best_sid="" best_ts=""
+  local d sid_name
+  for d in "$project_events_dir"/*/; do
+    [[ -d "$d" ]] || continue
+    sid_name="$(basename "$d")"
+
+    local enriched state started_at
+    enriched="$(gc_read_session_with_derived "$project_id" "$sid_name" 2>/dev/null)" || continue
+    state="$(printf '%s' "$enriched" | jq -r '.state // "unknown"')"
+
+    # Skip active sessions
+    [[ "$state" == "active" ]] && continue
+
+    started_at="$(printf '%s' "$enriched" | jq -r '.started_at // ""')"
+    if [[ -z "$best_ts" || "$started_at" > "$best_ts" ]]; then
+      best_ts="$started_at"
+      best_sid="$sid_name"
+    fi
+  done
+
+  if [[ -z "$best_sid" ]]; then
+    echo "No previous ended sessions found." >&2
+    return 3
+  fi
+
+  # Delegate to session subcommand
+  if [[ "$include_parent" == "true" ]]; then
+    _gc_query_session "$best_sid" --include-parent --format "$format"
+  else
+    _gc_query_session "$best_sid" --format "$format"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1361,6 +1421,7 @@ main() {
     events)     _gc_query_events "$@" ;;
     tail)       _gc_query_tail "$@" ;;
     last)       _gc_query_last "$@" ;;
+    previous|prev) _gc_query_previous "$@" ;;
     session)    _gc_query_session "$@" ;;
     sessions)   _gc_query_sessions "$@" ;;
     search)     _gc_query_search "$@" ;;
