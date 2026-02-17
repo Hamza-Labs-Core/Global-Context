@@ -98,24 +98,37 @@ echo "=== T-8: Install preserves existing user hooks ==="
 (
   tmpdir=$(setup_env)
   mkdir -p "$tmpdir/home/.claude"
-  # Create settings with user hook
+  # Create settings with user hook (nested format)
   cat > "$tmpdir/home/.claude/settings.json" <<'JSON'
 {
   "hooks": {
     "PreToolUse": [
       {
-        "type": "command",
-        "command": "/usr/local/bin/my-custom-hook",
-        "timeout": 3000
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/my-custom-hook",
+            "timeout": 3000
+          }
+        ]
       }
     ]
   }
 }
 JSON
   run_install "$tmpdir" install
-  # Check user hook still exists
-  user_hook_count=$(jq '[.hooks.PreToolUse[] | select(.command | contains("my-custom-hook"))] | length' "$tmpdir/home/.claude/settings.json")
-  gc_hook_count=$(jq '[.hooks.PreToolUse[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json")
+  # Check user hook still exists (search nested .hooks[].command)
+  user_hook_count=$(jq '[.hooks.PreToolUse[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("my-custom-hook"))] | length) > 0
+    else ((.command // "") | contains("my-custom-hook"))
+    end
+  )] | length' "$tmpdir/home/.claude/settings.json")
+  gc_hook_count=$(jq '[.hooks.PreToolUse[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+    else ((.command // "") | contains("gc-hook"))
+    end
+  )] | length' "$tmpdir/home/.claude/settings.json")
   assert_eq "user hook preserved" "1" "$user_hook_count"
   assert_eq "gc hook added alongside user hook" "1" "$gc_hook_count"
   rm -rf "$tmpdir"
@@ -152,7 +165,11 @@ echo "=== T-10: Idempotent reinstall ==="
   run_install "$tmpdir" install
   # Check no duplicate gc-hook entries in any event
   for hook_name in SessionStart UserPromptSubmit PreToolUse PostToolUse PostToolUseFailure SubagentStart SubagentStop Stop PreCompact SessionEnd; do
-    gc_count=$(jq --arg h "$hook_name" '[.hooks[$h][] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json")
+    gc_count=$(jq --arg h "$hook_name" '[.hooks[$h][] | select(
+      if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+      else ((.command // "") | contains("gc-hook"))
+      end
+    )] | length' "$tmpdir/home/.claude/settings.json")
     assert_eq "no duplicate for $hook_name" "1" "$gc_count"
   done
   rm -rf "$tmpdir"
@@ -170,9 +187,14 @@ echo "=== T-11: Uninstall removes only GC hooks ==="
   "hooks": {
     "PreToolUse": [
       {
-        "type": "command",
-        "command": "/usr/local/bin/my-custom-hook",
-        "timeout": 3000
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/my-custom-hook",
+            "timeout": 3000
+          }
+        ]
       }
     ]
   }
@@ -180,8 +202,16 @@ echo "=== T-11: Uninstall removes only GC hooks ==="
 JSON
   run_install "$tmpdir" install
   run_install "$tmpdir" uninstall
-  user_hook_count=$(jq '[.hooks.PreToolUse[] | select(.command | contains("my-custom-hook"))] | length' "$tmpdir/home/.claude/settings.json")
-  gc_hook_present=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json")
+  user_hook_count=$(jq '[.hooks.PreToolUse[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("my-custom-hook"))] | length) > 0
+    else ((.command // "") | contains("my-custom-hook"))
+    end
+  )] | length' "$tmpdir/home/.claude/settings.json")
+  gc_hook_present=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+    else ((.command // "") | contains("gc-hook"))
+    end
+  )] | length' "$tmpdir/home/.claude/settings.json")
   assert_eq "user hook survived uninstall" "1" "$user_hook_count"
   assert_eq "all gc hooks removed" "0" "$gc_hook_present"
   rm -rf "$tmpdir"
@@ -356,12 +386,17 @@ echo "=== T-20: Upgrade from older config ==="
 (
   tmpdir=$(setup_env)
   run_install "$tmpdir" install
-  # Modify timeout of existing GC hook to 3000
-  HOME="$tmpdir/home" jq '.hooks.PreToolUse[0].timeout = 3000' "$tmpdir/home/.claude/settings.json" > "$tmpdir/home/.claude/settings.json.tmp"
+  # Modify timeout of existing GC hook's inner handler to 3000
+  HOME="$tmpdir/home" jq '.hooks.PreToolUse[0].hooks[0].timeout = 3000' "$tmpdir/home/.claude/settings.json" > "$tmpdir/home/.claude/settings.json.tmp"
   mv "$tmpdir/home/.claude/settings.json.tmp" "$tmpdir/home/.claude/settings.json"
   # Reinstall
   run_install "$tmpdir" install
-  actual_timeout=$(jq '[.hooks.PreToolUse[] | select(.command | contains("gc-hook"))][0].timeout' "$tmpdir/home/.claude/settings.json")
+  # Check timeout in nested format: matcher_group.hooks[0].timeout
+  actual_timeout=$(jq '[.hooks.PreToolUse[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+    else ((.command // "") | contains("gc-hook"))
+    end
+  )][0] | if .hooks then .hooks[0].timeout else .timeout end' "$tmpdir/home/.claude/settings.json")
   assert_eq "timeout updated to 5000" "5000" "$actual_timeout"
   rm -rf "$tmpdir"
 )
@@ -374,7 +409,7 @@ echo "=== T-21: CLAUDE_CONTEXT_PATH override ==="
   tmpdir=$(setup_env)
   run_install "$tmpdir" install
   # Verify settings.json has correct hook paths
-  first_cmd=$(jq -r '.hooks.SessionStart[0].command' "$tmpdir/home/.claude/settings.json")
+  first_cmd=$(jq -r '.hooks.SessionStart[0] | if .hooks then .hooks[0].command else .command end' "$tmpdir/home/.claude/settings.json")
   assert_contains "hook command uses canonical path" "$first_cmd" "gc-hook"
   rm -rf "$tmpdir"
 )

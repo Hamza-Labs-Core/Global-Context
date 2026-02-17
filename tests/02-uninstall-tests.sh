@@ -72,7 +72,11 @@ echo "=== T-1: Full uninstall with --force ==="
   tmpdir=$(setup_installed_env)
   HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --purge --force >/dev/null 2>&1
   # Check hooks removed
-  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
+  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+      if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+      else ((.command // "") | contains("gc-hook"))
+      end
+    )] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   assert_eq "hooks removed from settings.json" "0" "$gc_hook_count"
   # Check store deleted
   if [ ! -d "$tmpdir/gc-store" ]; then
@@ -92,7 +96,11 @@ echo "=== T-2: --keep-data preserves store ==="
   tmpdir=$(setup_installed_env)
   HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --force --keep-data >/dev/null 2>&1
   # Hooks should be removed
-  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
+  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+      if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+      else ((.command // "") | contains("gc-hook"))
+      end
+    )] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   assert_eq "hooks removed with --keep-data" "0" "$gc_hook_count"
   # Store should still exist
   if [ -d "$tmpdir/gc-store" ]; then
@@ -147,7 +155,11 @@ echo "=== T-4: --dry-run makes no changes ==="
   tmpdir=$(setup_installed_env)
   output=$(HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --dry-run 2>&1)
   # Hooks should still be present
-  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
+  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+      if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+      else ((.command // "") | contains("gc-hook"))
+      end
+    )] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   if [ "$gc_hook_count" -gt 0 ]; then
     echo "  PASS: hooks preserved in dry-run"
     _record_pass
@@ -200,7 +212,11 @@ echo "=== T-7: After full uninstall, no GC hooks and no store ==="
   tmpdir=$(setup_installed_env)
   HOME="$tmpdir/home" CLAUDE_CONTEXT_PATH="$tmpdir/gc-store" "$GC_UNINSTALL" --purge --force >/dev/null 2>&1
   # Verify no GC hooks
-  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
+  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+      if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+      else ((.command // "") | contains("gc-hook"))
+      end
+    )] | length' "$tmpdir/home/.claude/settings.json" 2>/dev/null || echo 0)
   assert_eq "no GC hooks after full uninstall" "0" "$gc_hook_count"
   # Verify no store
   if [ ! -d "$tmpdir/gc-store" ]; then

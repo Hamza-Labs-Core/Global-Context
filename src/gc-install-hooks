@@ -99,20 +99,34 @@ cmd_install() {
     # Build the command string
     local command_str="${GC_HOOK_PATH} ${event_type}"
 
-    # Build the hook entry (always include async field)
-    local hook_entry
-    if [ "$matcher_val" != "null" ]; then
-      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --arg matcher "$matcher_val" --argjson async "$async_val" \
-        '{type: "command", command: $cmd, timeout: $timeout, matcher: $matcher, async: $async}')
+    # Build the inner hook handler
+    local hook_handler
+    hook_handler=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" \
+      '{type: "command", command: $cmd, timeout: $timeout}')
+
+    # Build the outer matcher group (nested format: {matcher?, hooks: [handler]})
+    local matcher_group
+    if [ "$matcher_val" != "null" ] && [ -n "$matcher_val" ]; then
+      matcher_group=$(jq -n --arg matcher "$matcher_val" --argjson handler "$hook_handler" \
+        '{matcher: $matcher, hooks: [$handler]}')
     else
-      hook_entry=$(jq -n --arg cmd "$command_str" --argjson timeout "$timeout_val" --argjson async "$async_val" \
-        '{type: "command", command: $cmd, timeout: $timeout, async: $async}')
+      matcher_group=$(jq -n --argjson handler "$hook_handler" \
+        '{hooks: [$handler]}')
     fi
 
-    # Merge: remove old gc-hook entries, append new one
-    current_json=$(echo "$current_json" | jq --argjson new_hook "$hook_entry" --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
+    # Merge: remove old gc-hook matcher groups, append new one
+    # A matcher group "belongs to gc-hook" if any of its inner hooks' commands contain the identifier
+    current_json=$(echo "$current_json" | jq --argjson new_group "$matcher_group" --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
       '.hooks = (.hooks // {}) |
-       .hooks[$hook_name] = ([(.hooks[$hook_name] // [])[] | select((.command // "") | contains($identifier) | not)] + [$new_hook])')
+       .hooks[$hook_name] = ([(.hooks[$hook_name] // [])[] | select(
+         if .hooks then
+           # Nested format: check inner hooks for gc-hook
+           ([.hooks[] | select((.command // "") | contains($identifier))] | length) == 0
+         else
+           # Legacy flat format: check .command directly
+           ((.command // "") | contains($identifier)) | not
+         end
+       )] + [$new_group])')
   done
 
   # Write with 2-space indentation
@@ -148,12 +162,20 @@ cmd_uninstall() {
   local backup_path="${CLAUDE_SETTINGS_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
   cp "$CLAUDE_SETTINGS_FILE" "$backup_path"
 
-  # Remove all gc-hook entries from all hook arrays
+  # Remove all gc-hook entries from all hook arrays (handles nested format)
   local cleaned_json
   cleaned_json=$(jq --arg identifier "$HOOK_IDENTIFIER" '
     if .hooks then
       .hooks |= with_entries(
-        .value |= [.[] | select((.command // "") | contains($identifier) | not)]
+        .value |= [.[] | select(
+          if .hooks then
+            # Nested format: keep if no inner hooks contain identifier
+            ([.hooks[] | select((.command // "") | contains($identifier))] | length) == 0
+          else
+            # Legacy flat format: keep if command does not contain identifier
+            ((.command // "") | contains($identifier)) | not
+          end
+        )]
       ) |
       # Remove empty arrays
       .hooks |= with_entries(select(.value | length > 0)) |
@@ -208,10 +230,16 @@ cmd_validate() {
       continue
     fi
 
-    # Check that at least one entry contains gc-hook
+    # Check that at least one matcher group contains a gc-hook handler
     local gc_hook_count
     gc_hook_count=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))] | length' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select(
+        if .hooks then
+          ([.hooks[] | select((.command // "") | contains($identifier))] | length) > 0
+        else
+          ((.command // "") | contains($identifier))
+        end
+      )] | length' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$gc_hook_count" -eq 0 ]; then
       echo "FAIL: $hook_name -- no gc-hook entry found"
@@ -219,10 +247,16 @@ cmd_validate() {
       continue
     fi
 
-    # Verify the gc-hook entry has correct timeout
+    # Extract the gc-hook handler from the nested matcher group
     local actual_timeout
     actual_timeout=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].timeout' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select(
+        if .hooks then
+          ([.hooks[] | select((.command // "") | contains($identifier))] | length) > 0
+        else
+          ((.command // "") | contains($identifier))
+        end
+      )][0] | if .hooks then [.hooks[] | select((.command // "") | contains($identifier))][0].timeout else .timeout end' "$CLAUDE_SETTINGS_FILE")
 
     if [ "$actual_timeout" != "$HOOK_TIMEOUT" ]; then
       echo "FAIL: $hook_name -- timeout is $actual_timeout, expected $HOOK_TIMEOUT"
@@ -230,25 +264,25 @@ cmd_validate() {
       continue
     fi
 
-    # Verify async field matches config
-    local expected_async actual_async
-    expected_async=$(jq -r ".hooks[\"$hook_name\"].async" "$HOOK_CONFIG")
-    actual_async=$(jq --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].async' "$CLAUDE_SETTINGS_FILE")
-
-    if [ "$actual_async" != "$expected_async" ]; then
-      echo "FAIL: $hook_name -- async is $actual_async, expected $expected_async"
-      all_pass=false
-      continue
-    fi
-
-    # Verify matcher field matches config
+    # Verify matcher field matches config (matcher is on the outer group in nested format)
     local expected_matcher actual_matcher
     expected_matcher=$(jq -r ".hooks[\"$hook_name\"].matcher" "$HOOK_CONFIG")
     actual_matcher=$(jq -r --arg hook_name "$hook_name" --arg identifier "$HOOK_IDENTIFIER" \
-      '[.hooks[$hook_name][] | select((.command // "") | contains($identifier))][0].matcher // "null"' "$CLAUDE_SETTINGS_FILE")
+      '[.hooks[$hook_name][] | select(
+        if .hooks then
+          ([.hooks[] | select((.command // "") | contains($identifier))] | length) > 0
+        else
+          ((.command // "") | contains($identifier))
+        end
+      )][0].matcher // "null"' "$CLAUDE_SETTINGS_FILE")
 
-    if [ "$expected_matcher" != "$actual_matcher" ]; then
+    # Normalize: empty string and null both mean "match all"
+    local norm_expected="$expected_matcher"
+    local norm_actual="$actual_matcher"
+    [ "$norm_expected" = "" ] && norm_expected="null"
+    [ "$norm_actual" = "" ] && norm_actual="null"
+
+    if [ "$norm_expected" != "$norm_actual" ]; then
       echo "FAIL: $hook_name -- matcher is '$actual_matcher', expected '$expected_matcher'"
       all_pass=false
       continue

@@ -69,7 +69,11 @@ fi
 CLAUDE_SETTINGS_FILE="${HOME}/.claude/settings.json"
 hooks_present=false
 if [ -f "$CLAUDE_SETTINGS_FILE" ]; then
-  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(.command | contains("gc-hook"))] | length' "$CLAUDE_SETTINGS_FILE" 2>/dev/null || echo 0)
+  gc_hook_count=$(jq '[.hooks // {} | to_entries[] | .value[] | select(
+    if .hooks then ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) > 0
+    else ((.command // "") | contains("gc-hook"))
+    end
+  )] | length' "$CLAUDE_SETTINGS_FILE" 2>/dev/null || echo 0)
   if [ "$gc_hook_count" -gt 0 ]; then
     hooks_present=true
   fi
@@ -129,7 +133,13 @@ if [ "$hooks_present" = true ]; then
         local_cleaned=$(jq '
           if .hooks then
             .hooks |= with_entries(
-              .value |= [.[] | select(.command | contains("gc-hook") | not)]
+              .value |= [.[] | select(
+                if .hooks then
+                  ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) == 0
+                else
+                  ((.command // "") | contains("gc-hook")) | not
+                end
+              )]
             ) |
             .hooks |= with_entries(select(.value | length > 0)) |
             if (.hooks | length) == 0 then del(.hooks) else . end
@@ -146,7 +156,13 @@ if [ "$hooks_present" = true ]; then
     local_cleaned=$(jq '
       if .hooks then
         .hooks |= with_entries(
-          .value |= [.[] | select(.command | contains("gc-hook") | not)]
+          .value |= [.[] | select(
+                if .hooks then
+                  ([.hooks[] | select((.command // "") | contains("gc-hook"))] | length) == 0
+                else
+                  ((.command // "") | contains("gc-hook")) | not
+                end
+              )]
         ) |
         .hooks |= with_entries(select(.value | length > 0)) |
         if (.hooks | length) == 0 then del(.hooks) else . end
