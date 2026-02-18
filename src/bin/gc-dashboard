@@ -117,9 +117,44 @@ function generateInputSummary(toolName, toolInput) {
     case 'task':
       return {
         text: `Task: ${truncate(toolInput.description || toolInput.prompt || '?', 100)}`,
-        html: '<span class="ev-agent-icon">&#129302;</span> ' +
-          (toolInput.subagent_type ? '<span class="ev-code">' + escHtml(toolInput.subagent_type) + '</span> ' : '') +
-          '<span class="ev-output">' + escHtml(truncate(toolInput.description || toolInput.prompt || '?', 150)) + '</span>'
+        html: '<div class="ev-task"><span class="ev-task-icon">&#129302;</span> ' +
+          (toolInput.subagent_type ? '<span class="ev-task-agent-badge">' + escHtml(toolInput.subagent_type) + '</span> ' : '') +
+          '<span class="ev-output">' + escHtml(truncate(toolInput.description || toolInput.prompt || '?', 150)) + '</span>' +
+          (toolInput.run_in_background ? ' <span class="ev-task-bg-badge">bg</span>' : '') +
+          '</div>'
+      };
+    case 'taskcreate':
+      return {
+        text: `New task: ${toolInput.subject || '?'}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#9989;</span> New task: <strong>' + escHtml(truncate(toolInput.subject || '?', 120)) + '</strong>' +
+          (toolInput.description ? ' <span class="ev-output">' + escHtml(truncate(toolInput.description, 100)) + '</span>' : '') +
+          '</div>'
+      };
+    case 'taskupdate': {
+      const statusBadgeClass = { completed: 'ev-task-status-completed', in_progress: 'ev-task-status-inprogress', deleted: 'ev-task-status-deleted', pending: 'ev-task-status-pending' };
+      const statusCls = statusBadgeClass[toolInput.status] || 'ev-task-status-pending';
+      return {
+        text: `Task ${toolInput.taskId || '?'} -> ${toolInput.status || '?'}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128203;</span> ' + escHtml(toolInput.taskId || '?') +
+          ' <span class="ev-task-status ' + statusCls + '">' + escHtml(toolInput.status || '?') + '</span>' +
+          (toolInput.subject ? ' <span class="ev-output">' + escHtml(truncate(toolInput.subject, 100)) + '</span>' : '') +
+          '</div>'
+      };
+    }
+    case 'taskoutput':
+      return {
+        text: `Reading task output: ${toolInput.task_id || '?'}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128228;</span> Reading task output: <span class="ev-code">' + escHtml(toolInput.task_id || '?') + '</span></div>'
+      };
+    case 'taskstop':
+      return {
+        text: `Stopping task: ${toolInput.task_id || '?'}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#9209;</span> Stopping task: <span class="ev-code">' + escHtml(toolInput.task_id || '?') + '</span></div>'
+      };
+    case 'tasklist':
+      return {
+        text: 'Listing tasks',
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128203;</span> Listing tasks</div>'
       };
     default:
       return {
@@ -217,6 +252,48 @@ function generateOutputSummary(toolName, toolResponse, data) {
           ' <span class="ev-output">' + byteCount + ' chars fetched</span>'
       };
     }
+    case 'task': {
+      const preview = truncate(response, 200);
+      return {
+        text: `Task completed: ${truncate(response, 100)}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#129302;</span> <span class="ev-output ev-success">Task completed</span>' +
+          (preview ? '<div class="ev-bash-output">' + escHtml(preview) + '</div>' : '') +
+          '</div>'
+      };
+    }
+    case 'taskcreate':
+      return {
+        text: 'Task created',
+        html: '<div class="ev-task"><span class="ev-task-icon">&#9989;</span> <span class="ev-output ev-success">Task created</span></div>'
+      };
+    case 'taskupdate':
+      return {
+        text: 'Task updated',
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128203;</span> <span class="ev-output ev-success">Task updated</span></div>'
+      };
+    case 'taskoutput': {
+      const outPreview = truncate(response, 200);
+      return {
+        text: `Task output: ${truncate(response, 100)}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128228;</span> <span class="ev-output">Task output received</span>' +
+          (outPreview ? '<div class="ev-bash-output">' + escHtml(outPreview) + '</div>' : '') +
+          '</div>'
+      };
+    }
+    case 'taskstop':
+      return {
+        text: 'Task stopped',
+        html: '<div class="ev-task"><span class="ev-task-icon">&#9209;</span> <span class="ev-output">Task stopped</span></div>'
+      };
+    case 'tasklist': {
+      const listPreview = truncate(response, 200);
+      return {
+        text: `Task list: ${truncate(response, 100)}`,
+        html: '<div class="ev-task"><span class="ev-task-icon">&#128203;</span> <span class="ev-output">Tasks listed</span>' +
+          (listPreview ? '<div class="ev-bash-output">' + escHtml(listPreview) + '</div>' : '') +
+          '</div>'
+      };
+    }
     default:
       return {
         text: `${toolName}: ${truncate(response, 100)}`,
@@ -290,23 +367,117 @@ function generateEventSummary(event) {
 }
 
 // --- CLI args ---
+import { writeFileSync, unlinkSync, readFileSync, existsSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+
 let port = 4000;
-for (let i = 2; i < process.argv.length; i++) {
-  if (process.argv[i] === '--port' && process.argv[i + 1]) {
-    port = parseInt(process.argv[i + 1], 10);
+let command = 'start'; // default
+
+const args = process.argv.slice(2);
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--port' && args[i + 1]) {
+    port = parseInt(args[i + 1], 10);
     i++;
-  } else if (process.argv[i] === '--help') {
-    console.log('Usage: gc-dashboard [--port PORT]');
-    console.log('Default port: 4000');
+  } else if (args[i] === '--help' || args[i] === 'help') {
+    console.log('Usage: gc-dashboard [command] [--port PORT]');
+    console.log('');
+    console.log('Commands:');
+    console.log('  start      Start the dashboard (default)');
+    console.log('  stop       Stop the running dashboard');
+    console.log('  restart    Stop + start (for updates)');
+    console.log('  status     Show if dashboard is running');
+    console.log('');
+    console.log('Options:');
+    console.log('  --port PORT  HTTP port (default: 4000)');
     process.exit(0);
+  } else if (['start', 'stop', 'restart', 'status'].includes(args[i])) {
+    command = args[i];
   }
 }
-
-import { writeFileSync, unlinkSync, readFileSync } from 'node:fs';
 
 const BASE = getBasePath();
 const EVENTS_DIR = path.join(BASE, 'events');
 const PID_FILE = path.join(BASE, '.dashboard.pid');
+
+// --- Lifecycle commands ---
+
+function readPid() {
+  try {
+    const content = readFileSync(PID_FILE, 'utf-8').trim();
+    const [pidStr, portStr] = content.split('\n');
+    return { pid: parseInt(pidStr, 10), port: parseInt(portStr, 10) || 4000 };
+  } catch {
+    return null;
+  }
+}
+
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stopDashboard() {
+  const info = readPid();
+  if (!info || !isRunning(info.pid)) {
+    console.log('Dashboard is not running.');
+    return false;
+  }
+  try {
+    process.kill(info.pid, 'SIGTERM');
+    // Wait up to 2s for it to die
+    for (let i = 0; i < 20; i++) {
+      if (!isRunning(info.pid)) break;
+      execSync('sleep 0.1');
+    }
+    if (isRunning(info.pid)) {
+      process.kill(info.pid, 'SIGKILL');
+    }
+    try { unlinkSync(PID_FILE); } catch {}
+    console.log(`Dashboard (pid ${info.pid}) stopped.`);
+    return true;
+  } catch (e) {
+    console.error(`Failed to stop dashboard (pid ${info.pid}):`, e.message);
+    return false;
+  }
+}
+
+if (command === 'stop') {
+  stopDashboard();
+  process.exit(0);
+}
+
+if (command === 'status') {
+  const info = readPid();
+  if (info && isRunning(info.pid)) {
+    console.log(`Dashboard running: pid=${info.pid} port=${info.port}`);
+    console.log(`URL: http://localhost:${info.port}`);
+  } else {
+    console.log('Dashboard is not running.');
+    if (info) {
+      try { unlinkSync(PID_FILE); } catch {}
+    }
+  }
+  process.exit(0);
+}
+
+if (command === 'restart') {
+  stopDashboard();
+  // Fall through to start
+}
+
+// 'start' or 'restart' — check if already running (for plain 'start')
+if (command === 'start') {
+  const info = readPid();
+  if (info && isRunning(info.pid)) {
+    console.log(`Dashboard already running: pid=${info.pid} port=${info.port}`);
+    console.log(`Use 'gc-dashboard restart' to restart.`);
+    process.exit(0);
+  }
+}
 
 // --- Helpers ---
 
@@ -568,6 +739,17 @@ async function getProjectUsage(projectId) {
     }
   }
 
+  const byModel = {};
+  for (const s of sessions) {
+    const model = s.model || 'unknown';
+    if (!byModel[model]) byModel[model] = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 };
+    byModel[model].input_tokens += s.input_tokens;
+    byModel[model].output_tokens += s.output_tokens;
+    byModel[model].cache_read_tokens += s.cache_read_tokens;
+    byModel[model].cache_create_tokens += s.cache_create_tokens;
+    byModel[model].api_calls += s.api_calls;
+  }
+
   return {
     project_id: projectId,
     project_name: projectName(projectId),
@@ -575,6 +757,7 @@ async function getProjectUsage(projectId) {
     sessions,
     totals,
     weekly,
+    by_model: byModel,
   };
 }
 
@@ -1229,6 +1412,30 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     font-size: 13px;
   }
 
+  /* Model usage table */
+  .model-color-opus { color: var(--purple); }
+  .model-color-sonnet { color: var(--accent); }
+  .model-color-haiku { color: var(--green); }
+  .model-color-unknown { color: var(--text2); }
+
+  .model-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+
+  .model-dot-opus { background: var(--purple); }
+  .model-dot-sonnet { background: var(--accent); }
+  .model-dot-haiku { background: var(--green); }
+  .model-dot-unknown { background: var(--text2); }
+
+  .model-name {
+    font-weight: 500;
+    font-size: 12px;
+  }
+
   /* Expandable session details */
   .usage-table tbody tr.session-detail-row td {
     padding: 2px 12px 2px 28px;
@@ -1486,6 +1693,66 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .ev-error-icon {
     font-size: 12px;
     margin-right: 3px;
+  }
+
+  /* Task tools */
+  .ev-task {
+    border-left: 2px solid rgba(188,140,255,0.4);
+    padding-left: 6px;
+    background: rgba(188,140,255,0.03);
+    border-radius: 2px;
+  }
+
+  .ev-task-icon {
+    font-size: 13px;
+    margin-right: 3px;
+  }
+
+  .ev-task-agent-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(188,140,255,0.2);
+    color: var(--purple);
+    font-weight: 600;
+  }
+
+  .ev-task-bg-badge {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(139,148,158,0.25);
+    color: var(--text2);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  .ev-task-status {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+
+  .ev-task-status-completed {
+    background: rgba(63,185,80,0.15);
+    color: var(--green);
+  }
+
+  .ev-task-status-inprogress {
+    background: rgba(210,153,34,0.15);
+    color: var(--yellow);
+  }
+
+  .ev-task-status-deleted {
+    background: rgba(248,81,73,0.15);
+    color: var(--red);
+  }
+
+  .ev-task-status-pending {
+    background: rgba(139,148,158,0.15);
+    color: var(--text2);
   }
 
   /* Shared utility */
@@ -1855,6 +2122,15 @@ function getModelTier(model) {
   return 'opus';
 }
 
+function getModelColorClass(model) {
+  if (!model || model === 'unknown') return 'unknown';
+  const m = model.toLowerCase();
+  if (m.includes('haiku')) return 'haiku';
+  if (m.includes('sonnet')) return 'sonnet';
+  if (m.includes('opus')) return 'opus';
+  return 'unknown';
+}
+
 function calcCost(input, output, cacheRead, cacheCreate, model) {
   const tier = getModelTier(model);
   const p = MODEL_PRICING[tier];
@@ -1996,6 +2272,70 @@ function renderUsage() {
     '</div>';
 
   html += '</div>'; // usage-section
+
+  // Usage by Model table
+  const allModels = {};
+  for (const p of usageData) {
+    if (p.by_model) {
+      for (const [model, usage] of Object.entries(p.by_model)) {
+        if (!allModels[model]) allModels[model] = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 };
+        allModels[model].input_tokens += usage.input_tokens;
+        allModels[model].output_tokens += usage.output_tokens;
+        allModels[model].cache_read_tokens += usage.cache_read_tokens;
+        allModels[model].cache_create_tokens += usage.cache_create_tokens;
+        allModels[model].api_calls += usage.api_calls;
+      }
+    }
+  }
+
+  const modelEntries = Object.entries(allModels).sort((a, b) => {
+    const costA = calcCost(a[1].input_tokens, a[1].output_tokens, a[1].cache_read_tokens, a[1].cache_create_tokens, a[0]);
+    const costB = calcCost(b[1].input_tokens, b[1].output_tokens, b[1].cache_read_tokens, b[1].cache_create_tokens, b[0]);
+    return costB - costA;
+  });
+
+  if (modelEntries.length > 0) {
+    html += '<div class="usage-section">';
+    html += '<div class="usage-section-title">Usage by Model <span class="tag">' + modelEntries.length + ' models</span></div>';
+    html += '<table class="usage-table"><thead><tr>' +
+      '<th>Model</th>' +
+      '<th class="num">API Calls</th>' +
+      '<th class="num">Input</th>' +
+      '<th class="num">Output</th>' +
+      '<th class="num">Cache Read</th>' +
+      '<th class="num">Cache Create</th>' +
+      '<th class="num">Est. Cost</th>' +
+      '</tr></thead><tbody>';
+
+    let modelTotalCost = 0;
+    for (const [model, usage] of modelEntries) {
+      const mCost = calcCost(usage.input_tokens, usage.output_tokens, usage.cache_read_tokens, usage.cache_create_tokens, model);
+      modelTotalCost += mCost;
+      const colorCls = getModelColorClass(model);
+      html += '<tr>' +
+        '<td><span class="model-dot model-dot-' + colorCls + '"></span><span class="model-name model-color-' + colorCls + '">' + esc(model) + '</span></td>' +
+        '<td class="num">' + usage.api_calls + '</td>' +
+        '<td class="num">' + formatTokens(usage.input_tokens) + '</td>' +
+        '<td class="num">' + formatTokens(usage.output_tokens) + '</td>' +
+        '<td class="num">' + formatTokens(usage.cache_read_tokens) + '</td>' +
+        '<td class="num">' + formatTokens(usage.cache_create_tokens) + '</td>' +
+        '<td class="num ' + costClass(mCost) + '">' + formatCost(mCost) + '</td>' +
+        '</tr>';
+    }
+
+    html += '<tr class="totals-row">' +
+      '<td>Total</td>' +
+      '<td class="num">' + modelEntries.reduce((s, e) => s + e[1].api_calls, 0) + '</td>' +
+      '<td class="num">' + formatTokens(modelEntries.reduce((s, e) => s + e[1].input_tokens, 0)) + '</td>' +
+      '<td class="num">' + formatTokens(modelEntries.reduce((s, e) => s + e[1].output_tokens, 0)) + '</td>' +
+      '<td class="num">' + formatTokens(modelEntries.reduce((s, e) => s + e[1].cache_read_tokens, 0)) + '</td>' +
+      '<td class="num">' + formatTokens(modelEntries.reduce((s, e) => s + e[1].cache_create_tokens, 0)) + '</td>' +
+      '<td class="num ' + costClass(modelTotalCost) + '">' + formatCost(modelTotalCost) + '</td>' +
+      '</tr>';
+
+    html += '</tbody></table>';
+    html += '</div>'; // usage-section
+  }
 
   // Per-project table
   html += '<div class="usage-section">';
