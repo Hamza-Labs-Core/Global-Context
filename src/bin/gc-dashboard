@@ -7,7 +7,9 @@
 // Default port: 4000
 
 import http from 'node:http';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -24,20 +26,106 @@ function truncate(str, maxLen, suffix = '...') {
   return str.slice(0, maxLen) + suffix;
 }
 
+/** Escape HTML entities for safe embedding in generated HTML */
+function escHtml(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** Format a file path: dim directory, bright filename */
+function fmtPath(filePath) {
+  if (!filePath) return '<span class="ev-file">?</span>';
+  const parts = filePath.split('/');
+  // Show last 3 segments if path is long
+  const display = parts.length > 4 ? ['...', ...parts.slice(-3)] : parts;
+  const dir = display.slice(0, -1).join('/');
+  const file = display[display.length - 1];
+  if (dir) {
+    return '<span class="ev-file"><span class="ev-file-dir">' + escHtml(dir) + '/</span><span class="ev-file-name">' + escHtml(file) + '</span></span>';
+  }
+  return '<span class="ev-file"><span class="ev-file-name">' + escHtml(file) + '</span></span>';
+}
+
+/** Format a short domain from a URL */
+function fmtDomain(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, '');
+  } catch { return url; }
+}
+
 function generateInputSummary(toolName, toolInput) {
-  if (!toolInput) return `${toolName}: (no input)`;
+  if (!toolInput) return { text: `${toolName}: (no input)`, html: escHtml(toolName) + ': <span class="ev-output">(no input)</span>' };
   const name = (toolName || '').toLowerCase();
   switch (name) {
-    case 'read': return `Read ${toolInput.file_path || '?'}`;
-    case 'write': return `Write ${toolInput.file_path || '?'} (${(toolInput.content || '').length} chars)`;
-    case 'edit': return `Edit ${toolInput.file_path || '?'}`;
-    case 'bash': return `Bash: ${truncate(toolInput.command || '', 100)}`;
-    case 'glob': return `Glob ${toolInput.pattern || '?'} in ${toolInput.path || '.'}`;
-    case 'grep': return `Grep ${truncate(toolInput.pattern || '?', 50)} in ${toolInput.path || '.'}`;
-    case 'webfetch': return `WebFetch ${truncate(toolInput.url || '?', 80)}`;
-    case 'websearch': return `WebSearch ${truncate(toolInput.query || '?', 80)}`;
-    case 'task': return `Task: ${truncate(toolInput.description || toolInput.prompt || '?', 100)}`;
-    default: return `${toolName}: ${truncate(JSON.stringify(toolInput), 100)}`;
+    case 'read':
+      return {
+        text: `Read ${toolInput.file_path || '?'}`,
+        html: '<span class="ev-icon">&#128196;</span> ' + fmtPath(toolInput.file_path)
+      };
+    case 'write': {
+      const len = (toolInput.content || '').length;
+      return {
+        text: `Write ${toolInput.file_path || '?'} (${len} chars)`,
+        html: '<span class="ev-icon">&#9998;</span> ' + fmtPath(toolInput.file_path) + ' <span class="ev-output">(' + len + ' chars)</span>'
+      };
+    }
+    case 'edit':
+      return {
+        text: `Edit ${toolInput.file_path || '?'}`,
+        html: '<span class="ev-icon">&#128221;</span> ' + fmtPath(toolInput.file_path) +
+          (toolInput.old_string || toolInput.new_string ?
+            ' <span class="ev-diff"><span class="ev-diff-del">-' + escHtml(String((toolInput.old_string || '').split('\n').length)) + '</span> <span class="ev-diff-add">+' + escHtml(String((toolInput.new_string || '').split('\n').length)) + '</span> lines</span>'
+            : '')
+      };
+    case 'bash': {
+      const cmd = toolInput.command || '';
+      const desc = toolInput.description || '';
+      return {
+        text: `Bash: ${truncate(cmd, 100)}`,
+        html: '<div class="ev-bash"><span class="ev-bash-prompt">$</span> <code>' + escHtml(truncate(cmd, 200)) + '</code></div>' +
+          (desc ? '<div class="ev-output">' + escHtml(truncate(desc, 120)) + '</div>' : '')
+      };
+    }
+    case 'glob':
+      return {
+        text: `Glob ${toolInput.pattern || '?'} in ${toolInput.path || '.'}`,
+        html: '<span class="ev-icon">&#128269;</span> <span class="ev-search">' + escHtml(toolInput.pattern || '?') + '</span>' +
+          ' <span class="ev-output">in ' + escHtml(truncate(toolInput.path || '.', 60)) + '</span>'
+      };
+    case 'grep':
+      return {
+        text: `Grep ${truncate(toolInput.pattern || '?', 50)} in ${toolInput.path || '.'}`,
+        html: '<span class="ev-icon">&#128269;</span> <span class="ev-search">' + escHtml(truncate(toolInput.pattern || '?', 80)) + '</span>' +
+          ' <span class="ev-output">in ' + escHtml(truncate(toolInput.path || '.', 60)) + '</span>' +
+          (toolInput.output_mode ? ' <span class="ev-code">' + escHtml(toolInput.output_mode) + '</span>' : '')
+      };
+    case 'webfetch': {
+      const url = toolInput.url || '?';
+      const domain = fmtDomain(url);
+      return {
+        text: `WebFetch ${truncate(url, 80)}`,
+        html: '<span class="ev-web-icon">&#127760;</span> <a class="ev-web-link" href="' + escHtml(url) + '" target="_blank" rel="noopener">' + escHtml(domain) + '</a>' +
+          (toolInput.prompt ? ' <span class="ev-output">' + escHtml(truncate(toolInput.prompt, 80)) + '</span>' : '')
+      };
+    }
+    case 'websearch':
+      return {
+        text: `WebSearch ${truncate(toolInput.query || '?', 80)}`,
+        html: '<span class="ev-web-icon">&#128270;</span> <em class="ev-web-query">' + escHtml(truncate(toolInput.query || '?', 120)) + '</em>'
+      };
+    case 'task':
+      return {
+        text: `Task: ${truncate(toolInput.description || toolInput.prompt || '?', 100)}`,
+        html: '<span class="ev-agent-icon">&#129302;</span> ' +
+          (toolInput.subagent_type ? '<span class="ev-code">' + escHtml(toolInput.subagent_type) + '</span> ' : '') +
+          '<span class="ev-output">' + escHtml(truncate(toolInput.description || toolInput.prompt || '?', 150)) + '</span>'
+      };
+    default:
+      return {
+        text: `${toolName}: ${truncate(JSON.stringify(toolInput), 100)}`,
+        html: escHtml(toolName) + ': <span class="ev-output">' + escHtml(truncate(JSON.stringify(toolInput), 150)) + '</span>'
+      };
   }
 }
 
@@ -45,30 +133,159 @@ function generateOutputSummary(toolName, toolResponse, data) {
   const name = (toolName || '').toLowerCase();
   const response = typeof toolResponse === 'string' ? toolResponse : JSON.stringify(toolResponse || '');
   switch (name) {
-    case 'read': return `Read ${(response.match(/\n/g) || []).length + 1} lines`;
-    case 'write': return `Write completed`;
-    case 'edit': return `Edit completed`;
-    case 'bash': return `Bash exit=${data?.exit_code ?? data?.exitCode ?? '?'}: ${truncate(data?.stdout || response, 80)}`;
-    case 'glob': return `Glob: ${response.split('\n').filter(l => l.trim()).length} files`;
-    case 'grep': return `Grep: ${response.split('\n').filter(l => l.trim()).length} results`;
-    default: return `${toolName}: ${truncate(response, 100)}`;
+    case 'read': {
+      const lineCount = (response.match(/\n/g) || []).length + 1;
+      return {
+        text: `Read ${lineCount} lines`,
+        html: '<span class="ev-icon">&#128196;</span> <span class="ev-output">Read ' + lineCount + ' lines</span>'
+      };
+    }
+    case 'write':
+      return {
+        text: 'Write completed',
+        html: '<span class="ev-icon">&#9998;</span> <span class="ev-output ev-success">Write completed</span>'
+      };
+    case 'edit':
+      return {
+        text: 'Edit completed',
+        html: '<span class="ev-icon">&#128221;</span> <span class="ev-output ev-success">Edit completed</span>'
+      };
+    case 'bash': {
+      const exitCode = data?.exit_code ?? data?.exitCode ?? '?';
+      const stdout = data?.stdout || '';
+      const stderr = data?.stderr || '';
+      const exitInt = parseInt(exitCode, 10);
+      const exitBadge = exitInt !== 0
+        ? ' <span class="ev-exit-err">exit ' + escHtml(String(exitCode)) + '</span>'
+        : ' <span class="ev-exit-ok">exit 0</span>';
+      let outputPreview = '';
+      if (stderr && exitInt !== 0) {
+        outputPreview = '<div class="ev-bash-output ev-bash-stderr">' + escHtml(truncate(stderr, 200)) + '</div>';
+      } else if (stdout) {
+        outputPreview = '<div class="ev-bash-output">' + escHtml(truncate(stdout, 200)) + '</div>';
+      } else if (response && typeof toolResponse === 'string') {
+        outputPreview = '<div class="ev-bash-output">' + escHtml(truncate(response, 200)) + '</div>';
+      }
+      return {
+        text: `Bash exit=${exitCode}: ${truncate(stdout || response, 80)}`,
+        html: '<div class="ev-bash-result"><span class="ev-bash-prompt">$</span>' + exitBadge + '</div>' + outputPreview
+      };
+    }
+    case 'glob': {
+      const count = response.split('\n').filter(l => l.trim()).length;
+      return {
+        text: `Glob: ${count} files`,
+        html: '<span class="ev-icon">&#128269;</span> <span class="ev-search-result">' + count + ' files matched</span>'
+      };
+    }
+    case 'grep': {
+      const count = response.split('\n').filter(l => l.trim()).length;
+      return {
+        text: `Grep: ${count} results`,
+        html: '<span class="ev-icon">&#128269;</span> <span class="ev-search-result">' + count + ' results</span>'
+      };
+    }
+    case 'websearch': {
+      let resultsHtml = '';
+      if (toolResponse && typeof toolResponse === 'object') {
+        const results = toolResponse.results || toolResponse;
+        if (Array.isArray(results)) {
+          const top = results.slice(0, 3);
+          resultsHtml = '<div class="ev-web-results">' +
+            top.map(r => {
+              const title = escHtml(truncate(r.title || r.url || '?', 60));
+              const url = escHtml(r.url || '#');
+              return '<a class="ev-web-result-item" href="' + url + '" target="_blank" rel="noopener">' + title + '</a>';
+            }).join('') +
+            (results.length > 3 ? '<span class="ev-output">+' + (results.length - 3) + ' more</span>' : '') +
+            '</div>';
+        }
+      }
+      return {
+        text: `WebSearch: ${truncate(response, 100)}`,
+        html: '<span class="ev-web-icon">&#128270;</span> <span class="ev-output">Search complete</span>' + resultsHtml
+      };
+    }
+    case 'webfetch': {
+      const code = (toolResponse && typeof toolResponse === 'object') ? toolResponse.code : '';
+      const result = (toolResponse && typeof toolResponse === 'object') ? (toolResponse.result || '') : response;
+      const byteCount = typeof result === 'string' ? result.length : 0;
+      return {
+        text: `WebFetch: ${code || '?'} (${byteCount} bytes)`,
+        html: '<span class="ev-web-icon">&#127760;</span>' +
+          (code ? ' <span class="ev-code">HTTP ' + escHtml(String(code)) + '</span>' : '') +
+          ' <span class="ev-output">' + byteCount + ' chars fetched</span>'
+      };
+    }
+    default:
+      return {
+        text: `${toolName}: ${truncate(response, 100)}`,
+        html: escHtml(toolName) + ': <span class="ev-output">' + escHtml(truncate(response, 150)) + '</span>'
+      };
   }
 }
 
 function generateEventSummary(event) {
   const data = event.data || {};
   switch (event.event_type) {
-    case 'SessionStarted': return `Session started (model: ${data.model || '?'}, cwd: ${data.cwd || '?'})`;
-    case 'SessionEnded': return 'Session ended';
-    case 'UserPromptReceived': return `User: ${truncate(data.prompt || data.message || '', 200)}`;
-    case 'ToolCallRequested': return generateInputSummary(data.tool_name, data.tool_input);
-    case 'ToolCallCompleted': return generateOutputSummary(data.tool_name, data.tool_response || data.result, data);
-    case 'ToolCallFailed': return `FAILED ${data.tool_name || '?'}: ${truncate(data.error || '', 150)}`;
-    case 'AgentSpawned': return `Spawned ${data.agent_type || '?'}: ${truncate(data.description || '', 100)}`;
-    case 'AgentCompleted': return `Agent done: ${data.agent_type || '?'}`;
-    case 'TurnCompleted': return 'Turn completed';
-    case 'CompactionTriggered': return `COMPACTION at seq ${event.sequence}`;
-    default: return `${event.event_type} at seq ${event.sequence}`;
+    case 'SessionStarted':
+      return {
+        text: `Session started (model: ${data.model || '?'}, cwd: ${data.cwd || '?'})`,
+        html: '<span class="ev-session-icon">&#9654;</span> <span class="ev-code">' + escHtml(data.model || '?') + '</span> <span class="ev-output">cwd: ' + escHtml(truncate(data.cwd || '?', 80)) + '</span>'
+      };
+    case 'SessionEnded':
+      return {
+        text: 'Session ended',
+        html: '<span class="ev-session-icon">&#9632;</span> <span class="ev-output">Session ended</span>'
+      };
+    case 'UserPromptReceived': {
+      const prompt = data.prompt || data.message || '';
+      return {
+        text: `User: ${truncate(prompt, 200)}`,
+        html: '<span class="ev-prompt-icon">&#128172;</span> <span class="ev-prompt">' + escHtml(truncate(prompt, 300)) + '</span>'
+      };
+    }
+    case 'ToolCallRequested':
+      return generateInputSummary(data.tool_name, data.tool_input);
+    case 'ToolCallCompleted':
+      return generateOutputSummary(data.tool_name, data.tool_response || data.result, data);
+    case 'ToolCallFailed':
+      return {
+        text: `FAILED ${data.tool_name || '?'}: ${truncate(data.error || '', 150)}`,
+        html: '<div class="ev-error"><span class="ev-error-icon">&#10060;</span> <strong>' + escHtml(data.tool_name || '?') + '</strong>: ' + escHtml(truncate(data.error || '', 200)) + '</div>'
+      };
+    case 'AgentSpawned':
+      return {
+        text: `Spawned ${data.agent_type || '?'}: ${truncate(data.description || '', 100)}`,
+        html: '<span class="ev-agent-icon">&#129302;</span> <span class="ev-code">' + escHtml(data.agent_type || '?') + '</span>' +
+          (data.agent_id ? ' <span class="ev-output">#' + escHtml(truncate(data.agent_id, 12)) + '</span>' : '') +
+          (data.description ? ' <span class="ev-output">' + escHtml(truncate(data.description, 100)) + '</span>' : '')
+      };
+    case 'AgentCompleted':
+      return {
+        text: `Agent done: ${data.agent_type || '?'}`,
+        html: '<span class="ev-agent-icon">&#129302;</span> <span class="ev-code">' + escHtml(data.agent_type || '?') + '</span> <span class="ev-output ev-success">completed</span>' +
+          (data.agent_id ? ' <span class="ev-output">#' + escHtml(truncate(data.agent_id, 12)) + '</span>' : '')
+      };
+    case 'TurnCompleted': {
+      const resp = data.response || '';
+      return {
+        text: 'Turn completed' + (resp ? ': ' + truncate(resp, 100) : ''),
+        html: '<span class="ev-output">Turn completed</span>' +
+          (resp ? '<div class="ev-turn-preview">' + escHtml(truncate(resp, 200)) + '</div>' : '')
+      };
+    }
+    case 'CompactionTriggered':
+      return {
+        text: `COMPACTION at seq ${event.sequence}`,
+        html: '<span class="ev-compact-icon">&#9888;</span> <span class="ev-compact">Compaction triggered</span>' +
+          (data.trigger ? ' <span class="ev-output">' + escHtml(data.trigger) + '</span>' : '')
+      };
+    default:
+      return {
+        text: `${event.event_type} at seq ${event.sequence}`,
+        html: escHtml(event.event_type) + ' <span class="ev-output">seq ' + (event.sequence || '') + '</span>'
+      };
   }
 }
 
@@ -174,6 +391,193 @@ async function readEvents(projectId, sessionId, fromSeq = 0) {
   }
 }
 
+// --- Usage tracking ---
+
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+
+// Cache: key = "filepath:filesize" -> { sessions: Map<sessionId, sessionUsage> }
+const usageCache = new Map();
+
+/** Convert a project_dir (e.g. /home/meywd/GlobalContext) to Claude's dir name */
+function toClaudeDir(projectDir) {
+  return '-' + projectDir.replace(/^\//, '').replace(/\//g, '-');
+}
+
+/** Read project_dir from the first session.json found in a project's events dir */
+async function getProjectDir(projectId) {
+  const pdir = path.join(EVENTS_DIR, projectId);
+  try {
+    const entries = await readdir(pdir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const metaPath = path.join(pdir, e.name, 'session.json');
+      try {
+        const raw = await readFile(metaPath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed.project_dir) return parsed.project_dir;
+      } catch { /* try next */ }
+    }
+  } catch { /* no events dir */ }
+  return null;
+}
+
+/** Stream-parse a JSONL file and extract assistant usage entries */
+async function parseTranscriptFile(filePath) {
+  const sessions = new Map();
+
+  return new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath, { encoding: 'utf-8' });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+    rl.on('line', (line) => {
+      // Fast pre-filter: only parse lines that look like assistant entries
+      if (!line.includes('"type":"assistant"') && !line.includes('"type": "assistant"')) return;
+
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'assistant') return;
+
+        const usage = entry.message?.usage;
+        if (!usage) return;
+
+        const sessionId = entry.sessionId || 'unknown';
+        const model = entry.message?.model || 'unknown';
+        const timestamp = entry.timestamp || '';
+
+        if (!sessions.has(sessionId)) {
+          sessions.set(sessionId, {
+            session_id: sessionId,
+            api_calls: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            model: model,
+            started_at: timestamp,
+            last_api_call_at: timestamp,
+          });
+        }
+
+        const s = sessions.get(sessionId);
+        s.api_calls++;
+        s.input_tokens += usage.input_tokens || 0;
+        s.output_tokens += usage.output_tokens || 0;
+        s.cache_read_tokens += usage.cache_read_input_tokens || 0;
+        s.cache_create_tokens += usage.cache_creation_input_tokens || 0;
+        if (model !== 'unknown') s.model = model;
+        if (!s.started_at || timestamp < s.started_at) s.started_at = timestamp;
+        if (!s.last_api_call_at || timestamp > s.last_api_call_at) s.last_api_call_at = timestamp;
+      } catch { /* skip malformed line */ }
+    });
+
+    rl.on('close', () => resolve(sessions));
+    rl.on('error', (err) => reject(err));
+    stream.on('error', (err) => reject(err));
+  });
+}
+
+/** Get usage for a single JSONL file, using cache if file size unchanged */
+async function getFileUsage(filePath) {
+  try {
+    const st = await stat(filePath);
+    const cacheKey = filePath + ':' + st.size;
+
+    if (usageCache.has(cacheKey)) {
+      return usageCache.get(cacheKey);
+    }
+
+    const sessions = await parseTranscriptFile(filePath);
+    usageCache.set(cacheKey, sessions);
+    return sessions;
+  } catch {
+    return new Map();
+  }
+}
+
+/** Get usage data for a single project */
+async function getProjectUsage(projectId) {
+  const projectDir = await getProjectDir(projectId);
+  if (!projectDir) return null;
+
+  const claudeDir = toClaudeDir(projectDir);
+  const claudePath = path.join(CLAUDE_PROJECTS_DIR, claudeDir);
+
+  let files;
+  try {
+    const entries = await readdir(claudePath);
+    files = entries.filter(f => f.endsWith('.jsonl')).map(f => path.join(claudePath, f));
+  } catch {
+    return null;
+  }
+
+  // Aggregate all sessions across all transcript files
+  const allSessions = new Map();
+
+  for (const file of files) {
+    const fileSessions = await getFileUsage(file);
+    for (const [sid, usage] of fileSessions) {
+      if (!allSessions.has(sid)) {
+        allSessions.set(sid, { ...usage });
+      } else {
+        const existing = allSessions.get(sid);
+        existing.api_calls += usage.api_calls;
+        existing.input_tokens += usage.input_tokens;
+        existing.output_tokens += usage.output_tokens;
+        existing.cache_read_tokens += usage.cache_read_tokens;
+        existing.cache_create_tokens += usage.cache_create_tokens;
+        if (usage.model !== 'unknown') existing.model = usage.model;
+        if (usage.started_at < existing.started_at) existing.started_at = usage.started_at;
+        if (usage.last_api_call_at > existing.last_api_call_at) existing.last_api_call_at = usage.last_api_call_at;
+      }
+    }
+  }
+
+  const sessions = Array.from(allSessions.values())
+    .sort((a, b) => (b.last_api_call_at || '').localeCompare(a.last_api_call_at || ''));
+
+  const totals = {
+    api_calls: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_create_tokens: 0,
+  };
+
+  const now = new Date();
+  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const weekly = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_create_tokens: 0,
+  };
+
+  for (const s of sessions) {
+    totals.api_calls += s.api_calls;
+    totals.input_tokens += s.input_tokens;
+    totals.output_tokens += s.output_tokens;
+    totals.cache_read_tokens += s.cache_read_tokens;
+    totals.cache_create_tokens += s.cache_create_tokens;
+
+    // Weekly aggregation: check if session had activity this week
+    if (s.last_api_call_at && new Date(s.last_api_call_at) >= weekAgo) {
+      weekly.input_tokens += s.input_tokens;
+      weekly.output_tokens += s.output_tokens;
+      weekly.cache_read_tokens += s.cache_read_tokens;
+      weekly.cache_create_tokens += s.cache_create_tokens;
+    }
+  }
+
+  return {
+    project_id: projectId,
+    project_name: projectName(projectId),
+    claude_dir: claudeDir,
+    sessions,
+    totals,
+    weekly,
+  };
+}
+
 // --- HTTP server ---
 
 function sendJson(res, data, status = 200) {
@@ -215,6 +619,24 @@ const server = http.createServer(async (req, res) => {
       if (!projectId || !sessionId) return sendJson(res, { error: 'project and session params required' }, 400);
       const events = await readEvents(projectId, sessionId, from);
       return sendJson(res, events);
+    }
+
+    // --- Usage API ---
+    if (pathname === '/api/usage') {
+      const projectId = url.searchParams.get('project');
+      if (projectId) {
+        const usage = await getProjectUsage(projectId);
+        if (!usage) return sendJson(res, { error: 'project not found or no transcript data' }, 404);
+        return sendJson(res, usage);
+      }
+      // All projects
+      const projects = await listProjects();
+      const results = [];
+      for (const p of projects) {
+        const usage = await getProjectUsage(p.project_id);
+        if (usage) results.push(usage);
+      }
+      return sendJson(res, results);
     }
 
     // --- SSE stream ---
@@ -332,6 +754,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     grid-template-columns: 260px 1fr;
     grid-template-rows: 48px 1fr;
     height: 100vh;
+  }
+
+  .layout.full-width {
+    grid-template-columns: 1fr;
   }
 
   /* Header */
@@ -540,7 +966,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .col-time { width: 80px; color: var(--text2); }
   .col-project { width: 120px; }
   .col-type { width: 170px; }
-  .col-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .col-summary { overflow: hidden; }
 
   /* Event type colors */
   .etype { font-weight: 500; padding: 1px 6px; border-radius: 3px; font-size: 11px; white-space: nowrap; }
@@ -567,6 +993,528 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   }
 
   .empty-state .hint { font-size: 12px; color: var(--text2); opacity: 0.6; }
+
+  /* Header tabs */
+  .header-tabs {
+    display: flex;
+    gap: 2px;
+    margin-left: 16px;
+  }
+
+  .header-tab {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--text2);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .header-tab:hover {
+    color: var(--text);
+    background: var(--bg3);
+  }
+
+  .header-tab.active {
+    color: var(--accent);
+    background: var(--bg3);
+    border-color: var(--border);
+  }
+
+  /* Usage view */
+  .usage-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: none;
+  }
+
+  .usage-view.visible {
+    display: block;
+  }
+
+  .usage-section {
+    margin-bottom: 24px;
+  }
+
+  .usage-section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .usage-section-title .tag {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    background: rgba(88,166,255,0.15);
+    color: var(--accent);
+  }
+
+  .usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+  }
+
+  .usage-table thead th {
+    background: var(--bg3);
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .usage-table thead th.num {
+    text-align: right;
+  }
+
+  .usage-table tbody td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    vertical-align: middle;
+  }
+
+  .usage-table tbody td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  .usage-table tbody td.project-name {
+    font-weight: 500;
+    color: var(--accent);
+  }
+
+  .usage-table tbody tr:hover {
+    background: var(--bg2);
+  }
+
+  .usage-table tbody tr.totals-row {
+    border-top: 2px solid var(--border);
+    font-weight: 600;
+  }
+
+  .usage-table tbody tr.totals-row td {
+    padding-top: 10px;
+    color: var(--text);
+  }
+
+  .usage-cost {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  .usage-cost.high {
+    color: var(--orange);
+  }
+
+  .usage-cost.very-high {
+    color: var(--red);
+  }
+
+  /* Weekly progress section */
+  .weekly-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .weekly-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+  }
+
+  .weekly-card .wc-label {
+    font-size: 11px;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 6px;
+  }
+
+  .weekly-card .wc-value {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+
+  .weekly-card .wc-cost {
+    font-size: 12px;
+  }
+
+  .progress-bar-bg {
+    width: 100%;
+    height: 6px;
+    background: var(--bg3);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 8px;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width 0.3s;
+  }
+
+  .progress-bar-fill.warn { background: var(--orange); }
+  .progress-bar-fill.danger { background: var(--red); }
+
+  .weekly-limit-config {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 12px;
+    color: var(--text2);
+  }
+
+  .weekly-limit-config input {
+    width: 120px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-family: inherit;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    outline: none;
+  }
+
+  .weekly-limit-config input:focus {
+    border-color: var(--accent);
+  }
+
+  .weekly-limit-config button {
+    padding: 4px 10px;
+    font-size: 11px;
+    font-family: inherit;
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .weekly-limit-config button:hover {
+    background: var(--border);
+  }
+
+  .usage-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 200px;
+    color: var(--text2);
+    font-size: 13px;
+  }
+
+  /* Expandable session details */
+  .usage-table tbody tr.session-detail-row td {
+    padding: 2px 12px 2px 28px;
+    font-size: 11px;
+    color: var(--text2);
+    border-bottom: 1px solid rgba(48,54,61,0.5);
+  }
+
+  .usage-table tbody tr.session-detail-row:hover {
+    background: rgba(33,38,45,0.5);
+  }
+
+  .expand-btn {
+    background: none;
+    border: none;
+    color: var(--text2);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    padding: 0 4px;
+  }
+
+  .expand-btn:hover {
+    color: var(--accent);
+  }
+
+  /* --- Rich event detail styles --- */
+
+  /* Bash / Terminal */
+  .ev-bash {
+    background: #1a1e24;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-family: inherit;
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ev-bash code {
+    color: var(--green);
+    font-size: 11px;
+  }
+
+  .ev-bash-prompt {
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 4px;
+    user-select: none;
+  }
+
+  .ev-bash-result {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .ev-bash-output {
+    margin-top: 3px;
+    color: var(--text2);
+    font-size: 11px;
+    max-height: 40px;
+    overflow: hidden;
+    white-space: pre-wrap;
+    word-break: break-all;
+    opacity: 0.7;
+  }
+
+  .ev-bash-stderr {
+    color: var(--red);
+    opacity: 0.85;
+  }
+
+  .ev-exit-ok {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(63,185,80,0.15);
+    color: var(--green);
+  }
+
+  .ev-exit-err {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(248,81,73,0.2);
+    color: var(--red);
+    font-weight: 600;
+  }
+
+  /* File operations */
+  .ev-file {
+    font-family: inherit;
+  }
+
+  .ev-file-dir {
+    color: var(--text2);
+    opacity: 0.7;
+  }
+
+  .ev-file-name {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .ev-icon {
+    font-size: 12px;
+    margin-right: 2px;
+  }
+
+  /* Diff indicators */
+  .ev-diff {
+    font-size: 10px;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--bg3);
+  }
+
+  .ev-diff-del {
+    color: var(--red);
+    font-weight: 500;
+  }
+
+  .ev-diff-add {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  /* Search */
+  .ev-search {
+    background: rgba(210,153,34,0.15);
+    color: var(--yellow);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    font-size: 11px;
+  }
+
+  .ev-search-result {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  /* Web */
+  .ev-web-icon {
+    font-size: 13px;
+    margin-right: 3px;
+  }
+
+  .ev-web-link {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px dotted var(--accent);
+  }
+
+  .ev-web-link:hover {
+    border-bottom-style: solid;
+  }
+
+  .ev-web-query {
+    color: var(--text);
+    font-style: italic;
+  }
+
+  .ev-web-results {
+    margin-top: 3px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .ev-web-result-item {
+    font-size: 11px;
+    color: var(--accent);
+    text-decoration: none;
+    opacity: 0.8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ev-web-result-item:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+
+  .ev-web-result-item::before {
+    content: "\\2192 ";
+    color: var(--text2);
+  }
+
+  /* Agent */
+  .ev-agent-icon {
+    font-size: 13px;
+    margin-right: 3px;
+  }
+
+  /* Prompt / Conversation */
+  .ev-prompt-icon {
+    font-size: 13px;
+    margin-right: 3px;
+  }
+
+  .ev-prompt {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 60px;
+    overflow: hidden;
+    display: inline;
+  }
+
+  .ev-turn-preview {
+    margin-top: 3px;
+    color: var(--text2);
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 40px;
+    overflow: hidden;
+    opacity: 0.7;
+  }
+
+  /* Session */
+  .ev-session-icon {
+    font-size: 11px;
+    margin-right: 3px;
+  }
+
+  /* Compaction */
+  .ev-compact-icon {
+    color: var(--orange);
+    font-size: 13px;
+    margin-right: 3px;
+  }
+
+  .ev-compact {
+    color: var(--orange);
+    font-weight: 600;
+  }
+
+  /* Error */
+  .ev-error {
+    background: rgba(248,81,73,0.08);
+    border: 1px solid rgba(248,81,73,0.25);
+    border-radius: 4px;
+    padding: 3px 8px;
+    color: var(--red);
+  }
+
+  .ev-error-icon {
+    font-size: 12px;
+    margin-right: 3px;
+  }
+
+  /* Shared utility */
+  .ev-code {
+    background: var(--bg3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--purple);
+    font-weight: 500;
+  }
+
+  .ev-output {
+    color: var(--text2);
+    font-size: 11px;
+  }
+
+  .ev-success {
+    color: var(--green);
+  }
+
+  /* Make ToolCallFailed rows tinted */
+  .event-feed tr.ev-row-error {
+    background: rgba(248,81,73,0.04);
+  }
+
+  .event-feed tr.ev-row-error:hover {
+    background: rgba(248,81,73,0.08);
+  }
 </style>
 </head>
 <body>
@@ -575,6 +1523,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="header">
     <h1>GlobalContext</h1>
     <span class="meta" id="headerMeta">Dashboard</span>
+    <div class="header-tabs">
+      <button class="header-tab active" id="tabEvents" onclick="switchView('events')">Events</button>
+      <button class="header-tab" id="tabUsage" onclick="switchView('usage')">Usage</button>
+    </div>
     <div class="status">
       <div class="dot" id="statusDot"></div>
       <span id="statusText">Idle</span>
@@ -597,6 +1549,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <span>No events to display</span>
         <span class="hint">Select a project and session from the sidebar</span>
       </div>
+    </div>
+    <div class="usage-view" id="usageView">
+      <div class="usage-loading">Loading usage data...</div>
     </div>
   </div>
 
@@ -699,12 +1654,15 @@ function renderEvents() {
     const ts = e.timestamp ? e.timestamp.slice(11, 19) : '';
     const proj = (e.project_id || '').replace(/-[a-f0-9]{6}$/, '');
     const etypeClass = 'etype-' + (e.event_type || '');
-    html += '<tr>' +
+    const summary = e._summary || {};
+    const summaryHtml = typeof summary === 'object' ? (summary.html || esc(summary.text || '')) : esc(summary);
+    const rowClass = e.event_type === 'ToolCallFailed' ? ' class="ev-row-error"' : '';
+    html += '<tr' + rowClass + '>' +
       '<td class="col-seq">' + (e.sequence || '') + '</td>' +
       '<td class="col-time">' + ts + '</td>' +
       '<td class="col-project">' + esc(proj) + '</td>' +
       '<td class="col-type"><span class="etype ' + etypeClass + '">' + esc(e.event_type || '') + '</span></td>' +
-      '<td class="col-summary">' + esc(e._summary || '') + '</td>' +
+      '<td class="col-summary">' + summaryHtml + '</td>' +
       '</tr>';
   }
 
@@ -730,14 +1688,16 @@ function appendEvent(event) {
   const ts = event.timestamp ? event.timestamp.slice(11, 19) : '';
   const proj = (event.project_id || '').replace(/-[a-f0-9]{6}$/, '');
   const etypeClass = 'etype-' + (event.event_type || '');
+  const summary = event._summary || {};
+  const summaryHtml = typeof summary === 'object' ? (summary.html || esc(summary.text || '')) : esc(summary);
   const tr = document.createElement('tr');
-  tr.className = 'new';
+  tr.className = 'new' + (event.event_type === 'ToolCallFailed' ? ' ev-row-error' : '');
   tr.innerHTML =
     '<td class="col-seq">' + (event.sequence || '') + '</td>' +
     '<td class="col-time">' + ts + '</td>' +
     '<td class="col-project">' + esc(proj) + '</td>' +
     '<td class="col-type"><span class="etype ' + etypeClass + '">' + esc(event.event_type || '') + '</span></td>' +
-    '<td class="col-summary">' + esc(event._summary || '') + '</td>';
+    '<td class="col-summary">' + summaryHtml + '</td>';
 
   tbody.appendChild(tr);
 
@@ -848,6 +1808,291 @@ function esc(s) {
 function truncStr(s, n) {
   if (!s || s.length <= n) return s || '';
   return s.slice(0, n) + '...';
+}
+
+// --- View switching ---
+let currentView = 'events';
+
+function switchView(view) {
+  currentView = view;
+  const eventsEls = [$('eventFeed'), $('sessionHeader')];
+  const usageEl = $('usageView');
+  const sidebarEl = $('sidebar');
+  const layout = document.querySelector('.layout');
+
+  $('tabEvents').className = 'header-tab' + (view === 'events' ? ' active' : '');
+  $('tabUsage').className = 'header-tab' + (view === 'usage' ? ' active' : '');
+
+  if (view === 'usage') {
+    eventsEls.forEach(el => el.style.display = 'none');
+    usageEl.classList.add('visible');
+    sidebarEl.style.display = 'none';
+    layout.classList.add('full-width');
+    loadUsageData();
+  } else {
+    eventsEls.forEach(el => el.style.display = '');
+    usageEl.classList.remove('visible');
+    sidebarEl.style.display = '';
+    layout.classList.remove('full-width');
+  }
+}
+
+// --- Usage ---
+let usageData = null;
+let usageExpanded = {};
+
+const MODEL_PRICING = {
+  'opus': { input: 15, output: 75, cache_read: 1.5, cache_create: 18.75 },
+  'sonnet': { input: 3, output: 15, cache_read: 0.3, cache_create: 3.75 },
+  'haiku': { input: 0.8, output: 4, cache_read: 0.08, cache_create: 1 },
+};
+
+function getModelTier(model) {
+  if (!model) return 'opus';
+  const m = model.toLowerCase();
+  if (m.includes('haiku')) return 'haiku';
+  if (m.includes('sonnet')) return 'sonnet';
+  return 'opus';
+}
+
+function calcCost(input, output, cacheRead, cacheCreate, model) {
+  const tier = getModelTier(model);
+  const p = MODEL_PRICING[tier];
+  return (
+    (input / 1_000_000) * p.input +
+    (output / 1_000_000) * p.output +
+    (cacheRead / 1_000_000) * p.cache_read +
+    (cacheCreate / 1_000_000) * p.cache_create
+  );
+}
+
+function calcProjectCost(proj) {
+  let cost = 0;
+  for (const s of proj.sessions) {
+    cost += calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
+  }
+  return cost;
+}
+
+function formatTokens(n) {
+  if (n === 0) return '0';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return n.toString();
+}
+
+function formatCost(c) {
+  if (c >= 100) return '$' + c.toFixed(0);
+  if (c >= 10) return '$' + c.toFixed(1);
+  return '$' + c.toFixed(2);
+}
+
+function costClass(c) {
+  if (c >= 50) return 'usage-cost very-high';
+  if (c >= 10) return 'usage-cost high';
+  return 'usage-cost';
+}
+
+function getWeeklyLimit() {
+  try {
+    const v = localStorage.getItem('gc_weekly_token_limit');
+    return v ? parseInt(v, 10) : 0;
+  } catch { return 0; }
+}
+
+function setWeeklyLimit(v) {
+  try {
+    if (v && v > 0) {
+      localStorage.setItem('gc_weekly_token_limit', v.toString());
+    } else {
+      localStorage.removeItem('gc_weekly_token_limit');
+    }
+  } catch {}
+}
+
+async function loadUsageData() {
+  const el = $('usageView');
+  el.innerHTML = '<div class="usage-loading">Loading usage data...</div>';
+
+  try {
+    usageData = await api('/api/usage');
+    renderUsage();
+  } catch (err) {
+    el.innerHTML = '<div class="usage-loading">Failed to load usage data</div>';
+  }
+}
+
+function renderUsage() {
+  const el = $('usageView');
+  if (!usageData || !usageData.length) {
+    el.innerHTML = '<div class="empty-state"><span>No usage data available</span><span class="hint">No Claude transcript files found for tracked projects</span></div>';
+    return;
+  }
+
+  // Calculate weekly totals across all projects
+  const weeklyTotals = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+  let weeklyCost = 0;
+  for (const p of usageData) {
+    weeklyTotals.input_tokens += p.weekly.input_tokens;
+    weeklyTotals.output_tokens += p.weekly.output_tokens;
+    weeklyTotals.cache_read_tokens += p.weekly.cache_read_tokens;
+    weeklyTotals.cache_create_tokens += p.weekly.cache_create_tokens;
+    // Weekly cost per-session (only sessions with activity this week)
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - 7*24*60*60*1000);
+    for (const s of p.sessions) {
+      if (s.last_api_call_at && new Date(s.last_api_call_at) >= weekAgo) {
+        weeklyCost += calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
+      }
+    }
+  }
+
+  const weeklyLimit = getWeeklyLimit();
+  const totalWeeklyTokens = weeklyTotals.input_tokens + weeklyTotals.output_tokens + weeklyTotals.cache_read_tokens + weeklyTotals.cache_create_tokens;
+
+  let html = '';
+
+  // Weekly summary cards
+  html += '<div class="usage-section">';
+  html += '<div class="usage-section-title">This Week <span class="tag">7 days</span></div>';
+  html += '<div class="weekly-cards">';
+
+  html += '<div class="weekly-card">' +
+    '<div class="wc-label">Input Tokens</div>' +
+    '<div class="wc-value">' + formatTokens(weeklyTotals.input_tokens) + '</div>' +
+    '</div>';
+
+  html += '<div class="weekly-card">' +
+    '<div class="wc-label">Output Tokens</div>' +
+    '<div class="wc-value">' + formatTokens(weeklyTotals.output_tokens) + '</div>' +
+    '</div>';
+
+  html += '<div class="weekly-card">' +
+    '<div class="wc-label">Cache Read</div>' +
+    '<div class="wc-value">' + formatTokens(weeklyTotals.cache_read_tokens) + '</div>' +
+    '</div>';
+
+  html += '<div class="weekly-card">' +
+    '<div class="wc-label">Cache Create</div>' +
+    '<div class="wc-value">' + formatTokens(weeklyTotals.cache_create_tokens) + '</div>' +
+    '</div>';
+
+  html += '<div class="weekly-card">' +
+    '<div class="wc-label">Est. Cost</div>' +
+    '<div class="wc-value ' + costClass(weeklyCost) + '">' + formatCost(weeklyCost) + '</div>' +
+    (weeklyLimit > 0 ? '<div class="progress-bar-bg"><div class="progress-bar-fill' +
+      (totalWeeklyTokens/weeklyLimit > 0.9 ? ' danger' : totalWeeklyTokens/weeklyLimit > 0.7 ? ' warn' : '') +
+      '" style="width:' + Math.min(100, (totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%"></div></div>' : '') +
+    '</div>';
+
+  html += '</div>'; // weekly-cards
+
+  // Weekly limit config
+  html += '<div class="weekly-limit-config">' +
+    '<span>Weekly token limit:</span>' +
+    '<input type="text" id="weeklyLimitInput" placeholder="e.g. 50000000" value="' + (weeklyLimit > 0 ? weeklyLimit : '') + '">' +
+    '<button>Set</button>' +
+    (weeklyLimit > 0 ? '<span>' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) + ' (' + ((totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%)</span>' : '<span>Not configured</span>') +
+    '</div>';
+
+  html += '</div>'; // usage-section
+
+  // Per-project table
+  html += '<div class="usage-section">';
+  html += '<div class="usage-section-title">All Projects <span class="tag">' + usageData.length + ' projects</span></div>';
+
+  html += '<table class="usage-table"><thead><tr>' +
+    '<th></th>' +
+    '<th>Project</th>' +
+    '<th class="num">Sessions</th>' +
+    '<th class="num">Input</th>' +
+    '<th class="num">Output</th>' +
+    '<th class="num">Cache Read</th>' +
+    '<th class="num">Cache Create</th>' +
+    '<th class="num">Est. Cost</th>' +
+    '</tr></thead><tbody>';
+
+  let grandTotal = { sessions: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0, cost: 0 };
+
+  for (const p of usageData) {
+    const cost = calcProjectCost(p);
+    grandTotal.sessions += p.sessions.length;
+    grandTotal.input += p.totals.input_tokens;
+    grandTotal.output += p.totals.output_tokens;
+    grandTotal.cacheRead += p.totals.cache_read_tokens;
+    grandTotal.cacheCreate += p.totals.cache_create_tokens;
+    grandTotal.cost += cost;
+
+    const expanded = usageExpanded[p.project_id];
+
+    html += '<tr>' +
+      '<td><button class="expand-btn" data-pid="' + esc(p.project_id) + '">' + (expanded ? '[-]' : '[+]') + '</button></td>' +
+      '<td class="project-name">' + esc(p.project_name) + '</td>' +
+      '<td class="num">' + p.sessions.length + '</td>' +
+      '<td class="num">' + formatTokens(p.totals.input_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(p.totals.output_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(p.totals.cache_read_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(p.totals.cache_create_tokens) + '</td>' +
+      '<td class="num ' + costClass(cost) + '">' + formatCost(cost) + '</td>' +
+      '</tr>';
+
+    if (expanded) {
+      for (const s of p.sessions) {
+        const sCost = calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
+        const shortSid = s.session_id.length > 20 ? s.session_id.slice(0,8) + '..' + s.session_id.slice(-6) : s.session_id;
+        const timeStr = s.last_api_call_at ? s.last_api_call_at.slice(0,16).replace('T',' ') : '';
+        html += '<tr class="session-detail-row">' +
+          '<td></td>' +
+          '<td>' + esc(shortSid) + ' <span style="color:var(--text2);font-size:10px">' + esc(s.model || '') + '</span> <span style="color:var(--text2);font-size:10px">' + timeStr + '</span></td>' +
+          '<td class="num">' + s.api_calls + '</td>' +
+          '<td class="num">' + formatTokens(s.input_tokens) + '</td>' +
+          '<td class="num">' + formatTokens(s.output_tokens) + '</td>' +
+          '<td class="num">' + formatTokens(s.cache_read_tokens) + '</td>' +
+          '<td class="num">' + formatTokens(s.cache_create_tokens) + '</td>' +
+          '<td class="num ' + costClass(sCost) + '">' + formatCost(sCost) + '</td>' +
+          '</tr>';
+      }
+    }
+  }
+
+  // Grand total row
+  html += '<tr class="totals-row">' +
+    '<td></td>' +
+    '<td>Total</td>' +
+    '<td class="num">' + grandTotal.sessions + '</td>' +
+    '<td class="num">' + formatTokens(grandTotal.input) + '</td>' +
+    '<td class="num">' + formatTokens(grandTotal.output) + '</td>' +
+    '<td class="num">' + formatTokens(grandTotal.cacheRead) + '</td>' +
+    '<td class="num">' + formatTokens(grandTotal.cacheCreate) + '</td>' +
+    '<td class="num ' + costClass(grandTotal.cost) + '">' + formatCost(grandTotal.cost) + '</td>' +
+    '</tr>';
+
+  html += '</tbody></table>';
+  html += '</div>'; // usage-section
+
+  el.innerHTML = html;
+
+  // Bind expand buttons
+  el.querySelectorAll('.expand-btn[data-pid]').forEach(btn => {
+    btn.onclick = () => toggleProjectSessions(btn.dataset.pid);
+  });
+
+  // Bind weekly limit button
+  const limitBtn = el.querySelector('.weekly-limit-config button');
+  if (limitBtn) limitBtn.onclick = saveWeeklyLimit;
+}
+
+function toggleProjectSessions(projectId) {
+  usageExpanded[projectId] = !usageExpanded[projectId];
+  renderUsage();
+}
+
+function saveWeeklyLimit() {
+  const input = document.getElementById('weeklyLimitInput');
+  if (!input) return;
+  const val = parseInt(input.value.replace(/[^0-9]/g, ''), 10);
+  setWeeklyLimit(val || 0);
+  renderUsage();
 }
 
 // --- Init ---
