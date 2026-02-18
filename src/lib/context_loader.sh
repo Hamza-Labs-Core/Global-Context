@@ -11,6 +11,27 @@ source "${_CONTEXT_LOADER_DIR}/paths.sh"
 # shellcheck source=projection_check.sh
 source "${_CONTEXT_LOADER_DIR}/projection_check.sh"
 
+# _is_system_prompt(text)
+#
+# Returns 0 (true) if the prompt looks like a system-generated message
+# rather than an actual user prompt. These come through UserPromptSubmit
+# but are injected by Claude Code (task notifications, skill expansions, etc).
+# Uses strict matching: requires both opening AND closing tags to avoid
+# misclassifying real user messages that mention these tags.
+_is_system_prompt() {
+  local text="$1"
+  # Require both opening and closing tag (or a second system tag)
+  # to avoid false positives on user messages that mention tags
+  [[ "$text" == '<task-notification>'* && "$text" == *'</task-notification>'* ]] && return 0
+  [[ "$text" == '<task-notification>'* && "$text" == *'<task-id>'* ]] && return 0
+  [[ "$text" == '<task-id>'* && "$text" == *'</task-id>'* ]] && return 0
+  [[ "$text" == '<output-file>'* && "$text" == *'</output-file>'* ]] && return 0
+  [[ "$text" == '<system-reminder>'* && "$text" == *'</system-reminder>'* ]] && return 0
+  [[ "$text" == '<command-name>'* && "$text" == *'</command-name>'* ]] && return 0
+  [[ "$text" == '<command-message>'* && "$text" == *'</command-message>'* ]] && return 0
+  return 1
+}
+
 # load_context(project_id, session_id)
 #
 # Loads the context projection for a session. If current, reads from cache.
@@ -100,7 +121,7 @@ _build_degraded_context() {
         prompt_text="$(jq -r '.data.prompt // .data.message // empty' "$f" 2>/dev/null)" || true
         base="$(basename "$f" .json)"
         seq_num=$((10#$base))
-        if [[ -n "$prompt_text" ]]; then
+        if [[ -n "$prompt_text" ]] && ! _is_system_prompt "$prompt_text"; then
           last_prompt="$prompt_text"
           prompts="$(printf '%s' "$prompts" | jq --arg p "$prompt_text" --argjson seq "$seq_num" '. + [{prompt: $p, sequence: $seq}]')"
         fi
@@ -164,7 +185,7 @@ _build_minimal_projection() {
 
   local event_count=0 last_seq=0
   local started_at="" last_event_at="" last_prompt="" previous_session_id=""
-  local actions="[]" files_modified="[]" prompts="[]"
+  local actions="[]" files_modified="[]" prompts="[]" responses="[]"
 
   # Read previous_session_id from session.json if available
   local session_file="$events_dir/session.json"
@@ -195,9 +216,17 @@ _build_minimal_projection() {
     if [[ "$etype" == "UserPromptReceived" ]]; then
       local prompt_text
       prompt_text="$(jq -r '.data.prompt // .data.message // empty' "$f" 2>/dev/null)" || true
-      if [[ -n "$prompt_text" ]]; then
+      if [[ -n "$prompt_text" ]] && ! _is_system_prompt "$prompt_text"; then
         last_prompt="$prompt_text"
         prompts="$(printf '%s' "$prompts" | jq --arg p "$prompt_text" --argjson seq "$seq_num" '. + [{prompt: $p, sequence: $seq}]')"
+      fi
+    fi
+
+    if [[ "$etype" == "TurnCompleted" ]]; then
+      local response_text
+      response_text="$(jq -r '.data.response // empty' "$f" 2>/dev/null)" || true
+      if [[ -n "$response_text" ]]; then
+        responses="$(printf '%s' "$responses" | jq --arg r "$response_text" --argjson seq "$seq_num" '. + [{response: $r, sequence: $seq}]')"
       fi
     fi
   done
@@ -218,6 +247,7 @@ _build_minimal_projection() {
     --arg last_event_at "${last_event_at:-unknown}" \
     --arg last_prompt "${last_prompt:-}" \
     --argjson prompts "$prompts" \
+    --argjson responses "$responses" \
     --argjson actions "$actions" \
     --argjson files_modified "$files_modified" \
     --argjson previous_session_id "$prev_json" \
@@ -236,6 +266,7 @@ _build_minimal_projection() {
         "event_count": $event_count,
         "last_prompt": $last_prompt,
         "prompts": $prompts,
+        "responses": $responses,
         "previous_session_id": $previous_session_id,
         "actions": $actions,
         "files_modified": $files_modified,

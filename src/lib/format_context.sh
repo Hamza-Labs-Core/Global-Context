@@ -260,19 +260,32 @@ format_markdown() {
   fi
 
   # Normalize both real projection and degraded context into a common shape
+  # Also filter out system-injected prompts (task notifications, skill expansions, etc.)
   local data
   data="$(printf '%s' "$json" | jq '
+    def is_system_prompt:
+      (.prompt // "") as $p |
+      (($p | startswith("<task-notification>")) and (($p | contains("</task-notification>")) or ($p | contains("<task-id>")))) or
+      (($p | startswith("<task-id>")) and ($p | contains("</task-id>"))) or
+      (($p | startswith("<output-file>")) and ($p | contains("</output-file>"))) or
+      (($p | startswith("<system-reminder>")) and ($p | contains("</system-reminder>"))) or
+      (($p | startswith("<command-name>")) and ($p | contains("</command-name>"))) or
+      (($p | startswith("<command-message>")) and ($p | contains("</command-message>")));
     if .data then
       # Degraded/minimal projection path -- prompts may already be in .data
-      .data + {prompts: (.data.prompts // [])}
+      .data + {
+        prompts: [(.data.prompts // [])[] | select(is_system_prompt | not)],
+        responses: (.data.responses // [])
+      }
     else {
       session_id: (._session_id // .session.id // "unknown"),
       project_id: (._project_id // "unknown"),
       started_at: (.session.started_at // "unknown"),
       last_event_at: (.session.ended_at // "unknown"),
       event_count: (.session.event_count // ._last_sequence // 0),
-      last_prompt: ((.prompts // [])[-1].prompt // ""),
-      prompts: (.prompts // []),
+      last_prompt: ([(.prompts // [])[] | select(is_system_prompt | not)][-1].prompt // ""),
+      prompts: [(.prompts // [])[] | select(is_system_prompt | not)],
+      responses: (.responses // []),
       ended_at: (.session.ended_at // "in progress"),
       previous_session_id: (.session.previous_session_id // null),
       actions: [(.key_tool_calls // [])[] | {
@@ -321,25 +334,39 @@ format_markdown() {
   local prompts_count
   prompts_count="$(printf '%s' "$data" | jq -r '.prompts | length // 0')"
 
-  echo "## What Was Being Worked On"
+  local responses_count
+  responses_count="$(printf '%s' "$data" | jq -r '.responses | length // 0')"
+
+  echo "## Conversation"
   echo ""
-  if [[ "$prompts_count" -gt 1 ]]; then
-    # Show all prompts when there are multiple (includes interrupts)
-    local p=0
-    while [[ $p -lt $prompts_count ]]; do
-      local prompt_text
-      prompt_text="$(printf '%s' "$data" | jq -r ".prompts[$p].prompt // \"\"")"
-      if [[ -n "$prompt_text" ]]; then
-        echo "> ${prompt_text}"
+  if [[ "$prompts_count" -gt 0 || "$responses_count" -gt 0 ]]; then
+    # Build interleaved conversation from prompts and responses sorted by sequence
+    local conv
+    conv="$(printf '%s' "$data" | jq -r '
+      ([(.prompts // [])[] | {seq: .sequence, type: "user", text: .prompt}] +
+       [(.responses // [])[] | {seq: .sequence, type: "assistant", text: .response}])
+      | sort_by(.seq)[]
+      | "\(.type)\t\(.text)"
+    ')"
+    if [[ -n "$conv" ]]; then
+      while IFS=$'\t' read -r role text; do
+        if [[ "$role" == "user" ]]; then
+          echo "**User**: ${text}"
+        else
+          # Truncate long responses for display
+          if [[ ${#text} -gt 300 ]]; then
+            text="${text:0:300}..."
+          fi
+          echo "**Claude**: ${text}"
+        fi
         echo ""
-      fi
-      p=$((p + 1))
-    done
+      done <<< "$conv"
+    fi
   elif [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
-    echo "> ${last_prompt}"
+    echo "**User**: ${last_prompt}"
     echo ""
   else
-    echo "No prompt recorded."
+    echo "No conversation recorded."
     echo ""
   fi
 
@@ -446,16 +473,28 @@ format_text() {
 
   local data
   data="$(printf '%s' "$json" | jq '
+    def is_system_prompt:
+      (.prompt // "") as $p |
+      (($p | startswith("<task-notification>")) and (($p | contains("</task-notification>")) or ($p | contains("<task-id>")))) or
+      (($p | startswith("<task-id>")) and ($p | contains("</task-id>"))) or
+      (($p | startswith("<output-file>")) and ($p | contains("</output-file>"))) or
+      (($p | startswith("<system-reminder>")) and ($p | contains("</system-reminder>"))) or
+      (($p | startswith("<command-name>")) and ($p | contains("</command-name>"))) or
+      (($p | startswith("<command-message>")) and ($p | contains("</command-message>")));
     if .data then
-      .data + {prompts: (.data.prompts // [])}
+      .data + {
+        prompts: [(.data.prompts // [])[] | select(is_system_prompt | not)],
+        responses: (.data.responses // [])
+      }
     else {
       session_id: (._session_id // .session.id // "unknown"),
       project_id: (._project_id // "unknown"),
       started_at: (.session.started_at // "unknown"),
       last_event_at: (.session.ended_at // "unknown"),
       event_count: (.session.event_count // ._last_sequence // 0),
-      last_prompt: ((.prompts // [])[-1].prompt // ""),
-      prompts: (.prompts // []),
+      last_prompt: ([(.prompts // [])[] | select(is_system_prompt | not)][-1].prompt // ""),
+      prompts: [(.prompts // [])[] | select(is_system_prompt | not)],
+      responses: (.responses // []),
       ended_at: (.session.ended_at // "in progress"),
       actions: [(.key_tool_calls // [])[] | {
         tool_name: .tool_name,
@@ -489,17 +528,30 @@ format_text() {
   local prompts_count
   prompts_count="$(printf '%s' "$data" | jq -r '.prompts | length // 0')"
 
-  if [[ "$prompts_count" -gt 1 ]]; then
-    echo "User Prompts:"
-    local p=0
-    while [[ $p -lt $prompts_count ]]; do
-      local prompt_text
-      prompt_text="$(printf '%s' "$data" | jq -r ".prompts[$p].prompt // \"\"")"
-      if [[ -n "$prompt_text" ]]; then
-        echo "  - ${prompt_text}"
-      fi
-      p=$((p + 1))
-    done
+  local responses_count
+  responses_count="$(printf '%s' "$data" | jq -r '.responses | length // 0')"
+
+  if [[ "$prompts_count" -gt 0 || "$responses_count" -gt 0 ]]; then
+    echo "Conversation:"
+    local conv
+    conv="$(printf '%s' "$data" | jq -r '
+      ([(.prompts // [])[] | {seq: .sequence, type: "user", text: .prompt}] +
+       [(.responses // [])[] | {seq: .sequence, type: "assistant", text: .response}])
+      | sort_by(.seq)[]
+      | "\(.type)\t\(.text)"
+    ')"
+    if [[ -n "$conv" ]]; then
+      while IFS=$'\t' read -r role text; do
+        if [[ "$role" == "user" ]]; then
+          echo "  User: ${text}"
+        else
+          if [[ ${#text} -gt 300 ]]; then
+            text="${text:0:300}..."
+          fi
+          echo "  Claude: ${text}"
+        fi
+      done <<< "$conv"
+    fi
     echo ""
   elif [[ -n "$last_prompt" && "$last_prompt" != "null" ]]; then
     echo "Last Prompt:"

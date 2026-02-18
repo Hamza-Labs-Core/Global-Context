@@ -21,6 +21,46 @@ GC_BASE="${CLAUDE_CONTEXT_PATH:-$HOME/.claude-context}"
 # unreliable with pipe-based stdin from Claude Code (silent empty reads).
 PAYLOAD=$(cat 2>/dev/null) || true
 
+# Enrich TurnCompleted with Claude's response from the transcript.
+# Extraction happens inside the background subshell so gc-hook still
+# exits instantly. tail -200 avoids reading the full file (<5ms).
+_enrich_turn_completed() {
+  local payload="$1"
+  local transcript
+  transcript=$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null) || true
+
+  if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
+    printf '%s' "$payload"
+    return
+  fi
+
+  local response
+  response=$(tail -200 "$transcript" \
+    | jq -r -s '
+        [.[] | select(.type == "assistant")]
+        | last
+        | .message.content
+        | [.[] | select(.type == "text") | .text]
+        | join("")' 2>/dev/null) || true
+
+  if [ -z "$response" ] || [ "$response" = "null" ]; then
+    printf '%s' "$payload"
+    return
+  fi
+
+  # Truncate to 2000 chars to keep events reasonable
+  local response_length=${#response}
+  if [ "$response_length" -gt 2000 ]; then
+    response="${response:0:2000}..."
+  fi
+
+  printf '%s' "$payload" | jq -c \
+    --arg resp "$response" \
+    --argjson resp_len "$response_length" \
+    '. + {response: $resp, response_length: $resp_len}' 2>/dev/null \
+    || printf '%s' "$payload"
+}
+
 # Fire-and-forget: run capture-event in background to avoid blocking
 # Claude Code's event pipeline. The flock in capture-event still
 # serializes concurrent writes, so ordering is preserved.
@@ -29,12 +69,24 @@ if [ "${GC_DEBUG:-0}" = "1" ]; then
   source "$GC_BASE/lib/debug_log.sh" 2>/dev/null || true
   if type gc_debug_log &>/dev/null; then
     gc_debug_log "gc-hook invoked: event_type=$EVENT_TYPE payload_len=${#PAYLOAD}"
-    (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") &
+    if [ "$EVENT_TYPE" = "TurnCompleted" ]; then
+      (PAYLOAD=$(_enrich_turn_completed "$PAYLOAD"); printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") &
+    else
+      (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>>"${GC_LOG_FILE:-/dev/null}") &
+    fi
+  else
+    if [ "$EVENT_TYPE" = "TurnCompleted" ]; then
+      (PAYLOAD=$(_enrich_turn_completed "$PAYLOAD"); printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
+    else
+      (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
+    fi
+  fi
+else
+  if [ "$EVENT_TYPE" = "TurnCompleted" ]; then
+    (PAYLOAD=$(_enrich_turn_completed "$PAYLOAD"); printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
   else
     (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
   fi
-else
-  (printf '%s' "$PAYLOAD" | "$GC_BASE/bin/capture-event" "$EVENT_TYPE" >/dev/null 2>/dev/null) &
 fi
 
 # Auto-launch dashboard on SessionStarted if not already running
