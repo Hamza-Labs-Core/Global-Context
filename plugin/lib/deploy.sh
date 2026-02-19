@@ -163,17 +163,26 @@ gc_deploy_files() {
     fi
   fi
 
-  # Restart dashboard if it was running (picks up new code)
+  # Auto-start dashboard if it was previously enabled
   local dashboard_bin="$target_dir/bin/gc-dashboard"
-  if [ -x "$dashboard_bin" ] && [ -f "$target_dir/.dashboard.pid" ]; then
+  if [ -x "$dashboard_bin" ] && [ -f "$target_dir/.dashboard-enabled" ]; then
     local old_pid
     old_pid="$(head -1 "$target_dir/.dashboard.pid" 2>/dev/null)" || true
     if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+      # Running — restart to pick up new code
       if [ "$dry_run" = "true" ]; then
         echo "  Would restart: dashboard (pid $old_pid)"
       else
         "$dashboard_bin" restart >/dev/null 2>&1 &
         echo "  dashboard    restarted"
+      fi
+    else
+      # Not running but was enabled — start it
+      if [ "$dry_run" = "true" ]; then
+        echo "  Would start: dashboard"
+      else
+        "$dashboard_bin" start >/dev/null 2>&1 &
+        echo "  dashboard    started"
       fi
     fi
   fi

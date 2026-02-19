@@ -879,7 +879,7 @@ async function getProjectUsage(projectId) {
 // --- Utilization API ---
 
 // --- Dashboard config (server-side persistence) ---
-const DASHBOARD_CONFIG_PATH = path.join(GC_ROOT, '.dashboard-config.json');
+const DASHBOARD_CONFIG_PATH = path.join(BASE, '.dashboard-config.json');
 
 async function loadDashboardConfig() {
   try {
@@ -1127,6 +1127,8 @@ process.on('exit', removePid);
 
 server.listen(port, () => {
   writePid();
+  // Mark dashboard as enabled so deploy.sh can auto-start after updates
+  try { writeFileSync(path.join(BASE, '.dashboard-enabled'), `${port}\n`); } catch {}
   console.log(`GlobalContext Dashboard running at http://localhost:${port}`);
   console.log(`Data directory: ${BASE}`);
 });
