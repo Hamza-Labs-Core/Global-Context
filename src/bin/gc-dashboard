@@ -1599,59 +1599,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .progress-bar-fill.warn { background: var(--orange); }
   .progress-bar-fill.danger { background: var(--red); }
 
-  .weekly-budget-bar {
-    margin: 8px 0 4px;
-  }
-  .weekly-budget-label {
-    font-size: 13px;
-    margin-bottom: 4px;
-  }
-
-  .weekly-limit-config {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--text2);
-    flex-wrap: wrap;
-  }
-
-  .weekly-limit-config input {
-    width: 80px;
-    padding: 4px 8px;
-    font-size: 12px;
-    font-family: inherit;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    outline: none;
-  }
-
-  .weekly-limit-config input:focus {
-    border-color: var(--accent);
-  }
-
-  .preset-btn, .weekly-limit-config button {
-    padding: 4px 10px;
+  .pct-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(100,160,255,0.15);
+    color: var(--accent);
     font-size: 11px;
-    font-family: inherit;
-    background: var(--bg3);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-
-  .preset-btn:hover, .weekly-limit-config button:hover {
-    background: var(--border);
-  }
-
-  .preset-btn.active {
-    background: var(--accent);
-    color: var(--bg);
-    border-color: var(--accent);
+    font-weight: 500;
   }
 
   .usage-loading {
@@ -2631,20 +2586,6 @@ function costClass(c) {
   return 'usage-cost';
 }
 
-function getWeeklyLimit() {
-  return utilizationData?.weekly_limit || 0;
-}
-
-async function saveWeeklyLimitToServer(v) {
-  try {
-    await fetch('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ weekly_limit: v > 0 ? v : 0 }),
-    });
-    if (utilizationData) utilizationData.weekly_limit = v > 0 ? v : 0;
-  } catch {}
-}
 
 let utilizationData = null;
 
@@ -2690,8 +2631,6 @@ function renderUsage() {
     }
   }
 
-  const weeklyLimit = getWeeklyLimit();
-  const totalWeeklyTokens = weeklyTotals.input_tokens + weeklyTotals.output_tokens + weeklyTotals.cache_read_tokens + weeklyTotals.cache_create_tokens;
 
   let html = '';
 
@@ -2773,9 +2712,6 @@ function renderUsage() {
   html += '<div class="weekly-card">' +
     '<div class="wc-label">Est. Cost</div>' +
     '<div class="wc-value ' + costClass(weeklyCost) + '">' + formatCost(weeklyCost) + '</div>' +
-    (weeklyLimit > 0 ? '<div class="progress-bar-bg"><div class="progress-bar-fill' +
-      (totalWeeklyTokens/weeklyLimit > 0.9 ? ' danger' : totalWeeklyTokens/weeklyLimit > 0.7 ? ' warn' : '') +
-      '" style="width:' + Math.min(100, (totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%"></div></div>' : '') +
     '</div>';
 
   html += '</div>'; // weekly-cards
@@ -2815,34 +2751,6 @@ function renderUsage() {
     html += '</div>';
   }
 
-  // Weekly token budget — always shown, server-persisted
-  html += '<div class="weekly-limit-section">';
-  html += '<div class="usage-section-title" style="margin-top:12px">Weekly Token Budget</div>';
-
-  if (weeklyLimit > 0) {
-    const pctUsed = (totalWeeklyTokens / weeklyLimit) * 100;
-    const barCls = pctUsed > 90 ? 'danger' : pctUsed > 70 ? 'warn' : '';
-    html += '<div class="weekly-budget-bar">' +
-      '<div class="weekly-budget-label">' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) +
-      ' <span style="color:var(--text2)">(' + pctUsed.toFixed(1) + '%)</span></div>' +
-      '<div class="progress-bar-bg" style="height:10px"><div class="progress-bar-fill ' + barCls +
-      '" style="width:' + Math.min(100, pctUsed).toFixed(1) + '%"></div></div>' +
-      '</div>';
-  }
-
-  // Plan presets
-  html += '<div class="weekly-limit-config">' +
-    '<span>Set budget:</span>' +
-    '<button class="preset-btn" data-limit="0">None</button>' +
-    '<button class="preset-btn' + (weeklyLimit === 5000000 ? ' active' : '') + '" data-limit="5000000">5M</button>' +
-    '<button class="preset-btn' + (weeklyLimit === 25000000 ? ' active' : '') + '" data-limit="25000000">25M</button>' +
-    '<button class="preset-btn' + (weeklyLimit === 50000000 ? ' active' : '') + '" data-limit="50000000">50M</button>' +
-    '<button class="preset-btn' + (weeklyLimit === 100000000 ? ' active' : '') + '" data-limit="100000000">100M</button>' +
-    '<input type="text" id="weeklyLimitInput" placeholder="Custom" value="' + (weeklyLimit > 0 && ![5000000,25000000,50000000,100000000].includes(weeklyLimit) ? weeklyLimit : '') + '" style="width:80px">' +
-    '<button id="weeklyLimitSetBtn">Set</button>' +
-    '</div>';
-
-  html += '</div>'; // weekly-limit-section
 
   html += '</div>'; // usage-section
 
@@ -2952,21 +2860,9 @@ function renderUsage() {
   }
 
   // Per-project table (filtered by month)
-  html += '<div class="usage-section">';
-  html += '<div class="usage-section-title">All Projects <span class="tag">' + usageData.length + ' projects</span></div>';
-
-  html += '<table class="usage-table"><thead><tr>' +
-    '<th></th>' +
-    '<th>Project</th>' +
-    '<th class="num">Sessions</th>' +
-    '<th class="num">Input</th>' +
-    '<th class="num">Output</th>' +
-    '<th class="num">Cache Read</th>' +
-    '<th class="num">Cache Create</th>' +
-    '<th class="num">Est. Cost</th>' +
-    '</tr></thead><tbody>';
-
-  let grandTotal = { sessions: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0, cost: 0 };
+  // First pass: compute totals for percentage calculation
+  const projectStats = [];
+  let grandTotal = { sessions: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0, cost: 0, totalTokens: 0 };
 
   for (const p of usageData) {
     const filteredSessions = getFilteredSessions(p);
@@ -2981,6 +2877,7 @@ function renderUsage() {
       projTotals.cache_create_tokens += s.cache_create_tokens;
       projCost += calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
     }
+    const projTokens = projTotals.input_tokens + projTotals.output_tokens + projTotals.cache_read_tokens + projTotals.cache_create_tokens;
 
     grandTotal.sessions += filteredSessions.length;
     grandTotal.input += projTotals.input_tokens;
@@ -2988,12 +2885,35 @@ function renderUsage() {
     grandTotal.cacheRead += projTotals.cache_read_tokens;
     grandTotal.cacheCreate += projTotals.cache_create_tokens;
     grandTotal.cost += projCost;
+    grandTotal.totalTokens += projTokens;
 
+    projectStats.push({ p, filteredSessions, projTotals, projCost, projTokens });
+  }
+
+  // Second pass: render with percentages
+  html += '<div class="usage-section">';
+  html += '<div class="usage-section-title">All Projects <span class="tag">' + projectStats.length + ' projects</span></div>';
+
+  html += '<table class="usage-table"><thead><tr>' +
+    '<th></th>' +
+    '<th>Project</th>' +
+    '<th class="num">%</th>' +
+    '<th class="num">Sessions</th>' +
+    '<th class="num">Input</th>' +
+    '<th class="num">Output</th>' +
+    '<th class="num">Cache Read</th>' +
+    '<th class="num">Cache Create</th>' +
+    '<th class="num">Est. Cost</th>' +
+    '</tr></thead><tbody>';
+
+  for (const { p, filteredSessions, projTotals, projCost, projTokens } of projectStats) {
+    const pct = grandTotal.totalTokens > 0 ? (projTokens / grandTotal.totalTokens * 100) : 0;
     const expanded = usageExpanded[p.project_id];
 
     html += '<tr>' +
       '<td><button class="expand-btn" data-pid="' + esc(p.project_id) + '">' + (expanded ? '[-]' : '[+]') + '</button></td>' +
       '<td class="project-name">' + esc(p.project_name) + '</td>' +
+      '<td class="num"><span class="pct-badge">' + pct.toFixed(1) + '%</span></td>' +
       '<td class="num">' + filteredSessions.length + '</td>' +
       '<td class="num">' + formatTokens(projTotals.input_tokens) + '</td>' +
       '<td class="num">' + formatTokens(projTotals.output_tokens) + '</td>' +
@@ -3010,6 +2930,7 @@ function renderUsage() {
         html += '<tr class="session-detail-row">' +
           '<td></td>' +
           '<td>' + esc(shortSid) + ' <span style="color:var(--text2);font-size:10px">' + esc(s.model || '') + '</span> <span style="color:var(--text2);font-size:10px">' + timeStr + '</span></td>' +
+          '<td></td>' +
           '<td class="num">' + s.api_calls + '</td>' +
           '<td class="num">' + formatTokens(s.input_tokens) + '</td>' +
           '<td class="num">' + formatTokens(s.output_tokens) + '</td>' +
@@ -3025,6 +2946,7 @@ function renderUsage() {
   html += '<tr class="totals-row">' +
     '<td></td>' +
     '<td>Total</td>' +
+    '<td class="num">100%</td>' +
     '<td class="num">' + grandTotal.sessions + '</td>' +
     '<td class="num">' + formatTokens(grandTotal.input) + '</td>' +
     '<td class="num">' + formatTokens(grandTotal.output) + '</td>' +
@@ -3051,24 +2973,6 @@ function renderUsage() {
     };
   });
 
-  // Bind preset buttons
-  el.querySelectorAll('.preset-btn[data-limit]').forEach(btn => {
-    btn.onclick = async () => {
-      const val = parseInt(btn.dataset.limit, 10);
-      await saveWeeklyLimitToServer(val);
-      renderUsage();
-    };
-  });
-
-  // Bind custom Set button
-  const setBtn = document.getElementById('weeklyLimitSetBtn');
-  if (setBtn) setBtn.onclick = async () => {
-    const input = document.getElementById('weeklyLimitInput');
-    if (!input) return;
-    const val = parseInt(input.value.replace(/[^0-9]/g, ''), 10);
-    await saveWeeklyLimitToServer(val || 0);
-    renderUsage();
-  };
 }
 
 function toggleProjectSessions(projectId) {
