@@ -758,8 +758,16 @@ async function getProjectUsage(projectId) {
   const allSessions = new Map();
   const allDaily = new Map();
 
-  for (const file of files) {
-    const fileResult = await getFileUsage(file);
+  // Parse files concurrently (limit concurrency to avoid fd exhaustion)
+  const CONCURRENCY = 8;
+  const fileResults = [];
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const chunk = files.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(chunk.map(f => getFileUsage(f)));
+    fileResults.push(...results);
+  }
+
+  for (const fileResult of fileResults) {
     const fileSessions = fileResult.sessions || fileResult;
     const fileDaily = fileResult.daily || new Map();
 
@@ -1046,13 +1054,12 @@ const server = http.createServer(async (req, res) => {
         if (!usage) return sendJson(res, { error: 'project not found or no transcript data' }, 404);
         return sendJson(res, usage);
       }
-      // All projects
+      // All projects — fetch in parallel
       const projects = await listProjects();
-      const results = [];
-      for (const p of projects) {
-        const usage = await getProjectUsage(p.project_id);
-        if (usage) results.push(usage);
-      }
+      const usageResults = await Promise.all(
+        projects.map(p => getProjectUsage(p.project_id))
+      );
+      const results = usageResults.filter(Boolean);
       return sendJson(res, results);
     }
 
@@ -1131,6 +1138,11 @@ server.listen(port, () => {
   try { writeFileSync(path.join(BASE, '.dashboard-enabled'), `${port}\n`); } catch {}
   console.log(`GlobalContext Dashboard running at http://localhost:${port}`);
   console.log(`Data directory: ${BASE}`);
+
+  // Pre-warm usage cache in background (avoids slow first load)
+  listProjects().then(projects =>
+    Promise.all(projects.map(p => getProjectUsage(p.project_id).catch(() => null)))
+  ).then(() => console.log('Usage cache warmed')).catch(() => {});
 });
 
 // --- Inline Dashboard HTML ---
