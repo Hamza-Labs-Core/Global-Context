@@ -7,6 +7,7 @@
 // Default port: 4000
 
 import http from 'node:http';
+import https from 'node:https';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -317,6 +318,57 @@ function generateEventSummary(event) {
       };
     case 'UserPromptReceived': {
       const prompt = data.prompt || data.message || '';
+      const trimmedPrompt = prompt.trimStart();
+      // Detect system-injected messages by XML tag prefix
+      if (trimmedPrompt.startsWith('<task-notification>')) {
+        // Parse task notification: extract task-id, status, summary
+        const tidMatch = trimmedPrompt.match(/<task-id>\s*(.*?)\s*<\/task-id>/s);
+        const statusMatch = trimmedPrompt.match(/<status>\s*(.*?)\s*<\/status>/s);
+        const summaryMatch = trimmedPrompt.match(/<summary>\s*(.*?)\s*<\/summary>/s);
+        const tid = tidMatch ? tidMatch[1].trim() : '?';
+        const tStatus = statusMatch ? statusMatch[1].trim() : '?';
+        const tSummary = summaryMatch ? summaryMatch[1].trim() : '';
+        const statusBadgeCls = tStatus === 'completed' ? 'ev-systask-status-completed'
+          : tStatus === 'in_progress' ? 'ev-systask-status-inprogress'
+          : tStatus === 'error' || tStatus === 'failed' ? 'ev-systask-status-failed'
+          : 'ev-systask-status-other';
+        return {
+          text: `[System] Task notification: ${tid} ${tStatus}`,
+          html: '<div class="ev-sysmsg ev-sysmsg-task">' +
+            '<span class="ev-sysmsg-icon">&#129302;</span> ' +
+            '<span class="ev-sysmsg-label">Task</span> ' +
+            '<span class="ev-code">' + escHtml(truncate(tid, 20)) + '</span> ' +
+            '<span class="ev-systask-status ' + statusBadgeCls + '">' + escHtml(tStatus) + '</span>' +
+            (tSummary ? ' <span class="ev-output">' + escHtml(truncate(tSummary, 150)) + '</span>' : '') +
+            '</div>'
+        };
+      }
+      if (trimmedPrompt.startsWith('<system-reminder>')) {
+        const previewText = trimmedPrompt.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        return {
+          text: `[System] Reminder: ${truncate(previewText, 150)}`,
+          html: '<div class="ev-sysmsg ev-sysmsg-reminder">' +
+            '<span class="ev-sysmsg-icon">&#9881;</span> ' +
+            '<span class="ev-sysmsg-label">System Reminder</span> ' +
+            '<span class="ev-output">' + escHtml(truncate(previewText, 200)) + '</span>' +
+            '</div>'
+        };
+      }
+      if (trimmedPrompt.startsWith('<task-id>') || trimmedPrompt.startsWith('<output-file>') ||
+          trimmedPrompt.startsWith('<command-name>') || trimmedPrompt.startsWith('<command-message>')) {
+        const tagMatch = trimmedPrompt.match(/^<([a-z-]+)>/);
+        const tagName = tagMatch ? tagMatch[1] : 'system';
+        const innerText = trimmedPrompt.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        return {
+          text: `[System] ${tagName}: ${truncate(innerText, 150)}`,
+          html: '<div class="ev-sysmsg ev-sysmsg-meta">' +
+            '<span class="ev-sysmsg-icon">&#9881;</span> ' +
+            '<span class="ev-sysmsg-label">' + escHtml(tagName) + '</span> ' +
+            '<span class="ev-output">' + escHtml(truncate(innerText, 200)) + '</span>' +
+            '</div>'
+        };
+      }
+      // Real user prompt
       return {
         text: `User: ${truncate(prompt, 200)}`,
         html: '<span class="ev-prompt-icon">&#128172;</span> <span class="ev-prompt">' + escHtml(truncate(prompt, 300)) + '</span>'
@@ -595,6 +647,7 @@ async function getProjectDir(projectId) {
 /** Stream-parse a JSONL file and extract assistant usage entries */
 async function parseTranscriptFile(filePath) {
   const sessions = new Map();
+  const daily = new Map();
 
   return new Promise((resolve, reject) => {
     const stream = createReadStream(filePath, { encoding: 'utf-8' });
@@ -638,10 +691,30 @@ async function parseTranscriptFile(filePath) {
         if (model !== 'unknown') s.model = model;
         if (!s.started_at || timestamp < s.started_at) s.started_at = timestamp;
         if (!s.last_api_call_at || timestamp > s.last_api_call_at) s.last_api_call_at = timestamp;
+
+        // Aggregate daily data
+        const dateKey = timestamp.slice(0, 10); // 'YYYY-MM-DD'
+        if (dateKey && dateKey.length === 10) {
+          if (!daily.has(dateKey)) {
+            daily.set(dateKey, {
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_read_tokens: 0,
+              cache_create_tokens: 0,
+              api_calls: 0,
+            });
+          }
+          const d = daily.get(dateKey);
+          d.input_tokens += usage.input_tokens || 0;
+          d.output_tokens += usage.output_tokens || 0;
+          d.cache_read_tokens += usage.cache_read_input_tokens || 0;
+          d.cache_create_tokens += usage.cache_creation_input_tokens || 0;
+          d.api_calls++;
+        }
       } catch { /* skip malformed line */ }
     });
 
-    rl.on('close', () => resolve(sessions));
+    rl.on('close', () => resolve({ sessions, daily }));
     rl.on('error', (err) => reject(err));
     stream.on('error', (err) => reject(err));
   });
@@ -657,11 +730,11 @@ async function getFileUsage(filePath) {
       return usageCache.get(cacheKey);
     }
 
-    const sessions = await parseTranscriptFile(filePath);
-    usageCache.set(cacheKey, sessions);
-    return sessions;
+    const result = await parseTranscriptFile(filePath);
+    usageCache.set(cacheKey, result);
+    return result;
   } catch {
-    return new Map();
+    return { sessions: new Map(), daily: new Map() };
   }
 }
 
@@ -681,11 +754,15 @@ async function getProjectUsage(projectId) {
     return null;
   }
 
-  // Aggregate all sessions across all transcript files
+  // Aggregate all sessions and daily data across all transcript files
   const allSessions = new Map();
+  const allDaily = new Map();
 
   for (const file of files) {
-    const fileSessions = await getFileUsage(file);
+    const fileResult = await getFileUsage(file);
+    const fileSessions = fileResult.sessions || fileResult;
+    const fileDaily = fileResult.daily || new Map();
+
     for (const [sid, usage] of fileSessions) {
       if (!allSessions.has(sid)) {
         allSessions.set(sid, { ...usage });
@@ -699,6 +776,19 @@ async function getProjectUsage(projectId) {
         if (usage.model !== 'unknown') existing.model = usage.model;
         if (usage.started_at < existing.started_at) existing.started_at = usage.started_at;
         if (usage.last_api_call_at > existing.last_api_call_at) existing.last_api_call_at = usage.last_api_call_at;
+      }
+    }
+
+    for (const [dateKey, dayUsage] of fileDaily) {
+      if (!allDaily.has(dateKey)) {
+        allDaily.set(dateKey, { ...dayUsage });
+      } else {
+        const existing = allDaily.get(dateKey);
+        existing.input_tokens += dayUsage.input_tokens;
+        existing.output_tokens += dayUsage.output_tokens;
+        existing.cache_read_tokens += dayUsage.cache_read_tokens;
+        existing.cache_create_tokens += dayUsage.cache_create_tokens;
+        existing.api_calls += dayUsage.api_calls;
       }
     }
   }
@@ -750,6 +840,29 @@ async function getProjectUsage(projectId) {
     byModel[model].api_calls += s.api_calls;
   }
 
+  // Build daily array sorted ascending by date
+  const daily = Array.from(allDaily.entries())
+    .map(([date, d]) => ({ date, ...d }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // Build monthly aggregation from daily data
+  const monthlyMap = new Map();
+  for (const d of daily) {
+    const monthKey = d.date.slice(0, 7); // 'YYYY-MM'
+    if (!monthlyMap.has(monthKey)) {
+      monthlyMap.set(monthKey, { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 });
+    }
+    const m = monthlyMap.get(monthKey);
+    m.input_tokens += d.input_tokens;
+    m.output_tokens += d.output_tokens;
+    m.cache_read_tokens += d.cache_read_tokens;
+    m.cache_create_tokens += d.cache_create_tokens;
+    m.api_calls += d.api_calls;
+  }
+  const monthly = Array.from(monthlyMap.entries())
+    .map(([month, m]) => ({ month, ...m }))
+    .sort((a, b) => a.month.localeCompare(b.month));
+
   return {
     project_id: projectId,
     project_name: projectName(projectId),
@@ -758,7 +871,83 @@ async function getProjectUsage(projectId) {
     totals,
     weekly,
     by_model: byModel,
+    daily,
+    monthly,
   };
+}
+
+// --- Utilization API ---
+
+let utilizationCache = { data: null, fetchedAt: 0 };
+
+async function fetchUtilization() {
+  const now = Date.now();
+  if (utilizationCache.data && (now - utilizationCache.fetchedAt) < 60_000) {
+    return utilizationCache.data;
+  }
+
+  try {
+    const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
+    const raw = await readFile(credPath, 'utf-8');
+    const creds = JSON.parse(raw);
+    const token = creds?.claudeAiOauth?.accessToken;
+
+    if (!token) {
+      const result = { available: false, error: 'No access token found' };
+      utilizationCache = { data: result, fetchedAt: now };
+      return result;
+    }
+
+    const data = await new Promise((resolve, reject) => {
+      const req = https.get('https://api.anthropic.com/api/oauth/usage', {
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Accept': 'application/json',
+        },
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          try {
+            if (res.statusCode !== 200) {
+              resolve({ available: false, error: 'HTTP ' + res.statusCode + ': ' + body.slice(0, 200) });
+              return;
+            }
+            const parsed = JSON.parse(body);
+            resolve({
+              available: true,
+              five_hour: {
+                utilization: parsed.five_hour?.utilization ?? parsed.fiveHour?.utilization ?? null,
+                resets_at: parsed.five_hour?.resets_at ?? parsed.fiveHour?.resetsAt ?? null,
+              },
+              seven_day: {
+                utilization: parsed.seven_day?.utilization ?? parsed.sevenDay?.utilization ?? null,
+                resets_at: parsed.seven_day?.resets_at ?? parsed.sevenDay?.resetsAt ?? null,
+              },
+            });
+          } catch (e) {
+            resolve({ available: false, error: 'Parse error: ' + e.message });
+          }
+        });
+      });
+
+      req.on('error', (e) => {
+        resolve({ available: false, error: 'Request error: ' + e.message });
+      });
+
+      req.setTimeout(10_000, () => {
+        req.destroy();
+        resolve({ available: false, error: 'Request timeout' });
+      });
+    });
+
+    utilizationCache = { data, fetchedAt: now };
+    return data;
+  } catch (e) {
+    const result = { available: false, error: e.message };
+    utilizationCache = { data: result, fetchedAt: now };
+    return result;
+  }
 }
 
 // --- HTTP server ---
@@ -802,6 +991,12 @@ const server = http.createServer(async (req, res) => {
       if (!projectId || !sessionId) return sendJson(res, { error: 'project and session params required' }, 400);
       const events = await readEvents(projectId, sessionId, from);
       return sendJson(res, events);
+    }
+
+    // --- Utilization API ---
+    if (pathname === '/api/usage/utilization') {
+      const util = await fetchUtilization();
+      return sendJson(res, util);
     }
 
     // --- Usage API ---
@@ -1412,6 +1607,139 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     font-size: 13px;
   }
 
+  /* Daily usage timeline */
+  .timeline-section {
+    margin-bottom: 24px;
+  }
+
+  .timeline-chart {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .timeline-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 90px;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+
+  .timeline-date {
+    font-size: 11px;
+    color: var(--text2);
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .timeline-bar-bg {
+    height: 14px;
+    background: rgba(139,148,158,0.08);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .timeline-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    min-width: 0;
+    transition: width 0.3s;
+  }
+
+  .timeline-bar.empty {
+    background: var(--border);
+    height: 2px;
+    margin-top: 6px;
+  }
+
+  .timeline-value {
+    font-size: 11px;
+    color: var(--text2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Month selector */
+  .month-selector {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 16px;
+  }
+
+  .month-btn {
+    padding: 4px 12px;
+    font-size: 11px;
+    font-family: inherit;
+    color: var(--text2);
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .month-btn:hover {
+    color: var(--text);
+    background: var(--bg3);
+  }
+
+  .month-btn.active {
+    color: var(--accent);
+    background: var(--bg3);
+    border-color: var(--accent);
+  }
+
+  /* Utilization bars */
+  .utilization-section {
+    margin-bottom: 20px;
+  }
+
+  .util-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .util-label {
+    font-size: 12px;
+    color: var(--text2);
+    min-width: 120px;
+  }
+
+  .util-bar-bg {
+    flex: 1;
+    height: 16px;
+    background: var(--bg3);
+    border-radius: 4px;
+    overflow: hidden;
+    max-width: 400px;
+  }
+
+  .util-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s;
+  }
+
+  .util-bar.green { background: var(--green); }
+  .util-bar.yellow { background: var(--yellow); }
+  .util-bar.red { background: var(--red); }
+
+  .util-pct {
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 48px;
+    color: var(--text);
+  }
+
+  .util-reset {
+    font-size: 11px;
+    color: var(--text2);
+  }
+
   /* Model usage table */
   .model-color-opus { color: var(--purple); }
   .model-color-sonnet { color: var(--accent); }
@@ -1661,6 +1989,83 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     max-height: 40px;
     overflow: hidden;
     opacity: 0.7;
+  }
+
+  /* System-injected messages */
+  .ev-sysmsg {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+
+  .ev-sysmsg-task {
+    background: rgba(188,140,255,0.08);
+    border-left: 2px solid var(--purple);
+  }
+
+  .ev-sysmsg-reminder {
+    background: rgba(139,148,158,0.08);
+    border-left: 2px solid var(--text2);
+  }
+
+  .ev-sysmsg-meta {
+    background: rgba(139,148,158,0.06);
+    border-left: 2px solid var(--border);
+  }
+
+  .ev-sysmsg-icon {
+    font-size: 13px;
+    opacity: 0.8;
+  }
+
+  .ev-sysmsg-label {
+    font-weight: 600;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--text2);
+  }
+
+  .ev-sysmsg-task .ev-sysmsg-icon {
+    color: var(--purple);
+  }
+
+  .ev-sysmsg-task .ev-sysmsg-label {
+    color: var(--purple);
+  }
+
+  .ev-sysmsg-reminder .ev-sysmsg-icon {
+    color: var(--text2);
+  }
+
+  .ev-systask-status {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+  }
+
+  .ev-systask-status-completed {
+    background: rgba(63,185,80,0.15);
+    color: var(--green);
+  }
+
+  .ev-systask-status-inprogress {
+    background: rgba(210,153,34,0.15);
+    color: var(--yellow);
+  }
+
+  .ev-systask-status-failed {
+    background: rgba(248,81,73,0.15);
+    color: var(--red);
+  }
+
+  .ev-systask-status-other {
+    background: rgba(139,148,158,0.15);
+    color: var(--text2);
   }
 
   /* Session */
@@ -2107,6 +2512,7 @@ function switchView(view) {
 // --- Usage ---
 let usageData = null;
 let usageExpanded = {};
+let usageSelectedMonth = null; // null = all time, 'YYYY-MM' = filter to month
 
 const MODEL_PRICING = {
   'opus': { input: 15, output: 75, cache_read: 1.5, cache_create: 18.75 },
@@ -2186,12 +2592,19 @@ function setWeeklyLimit(v) {
   } catch {}
 }
 
+let utilizationData = null;
+
 async function loadUsageData() {
   const el = $('usageView');
   el.innerHTML = '<div class="usage-loading">Loading usage data...</div>';
 
   try {
-    usageData = await api('/api/usage');
+    const [usage, util] = await Promise.all([
+      api('/api/usage'),
+      api('/api/usage/utilization').catch(() => ({ available: false })),
+    ]);
+    usageData = usage;
+    utilizationData = util;
     renderUsage();
   } catch (err) {
     el.innerHTML = '<div class="usage-loading">Failed to load usage data</div>';
@@ -2228,6 +2641,56 @@ function renderUsage() {
 
   let html = '';
 
+  // --- Daily Usage Timeline (last 30 days) ---
+  // Aggregate daily data across all projects
+  const dailyAgg = {};
+  for (const p of usageData) {
+    if (p.daily) {
+      for (const d of p.daily) {
+        if (!dailyAgg[d.date]) {
+          dailyAgg[d.date] = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 };
+        }
+        dailyAgg[d.date].input_tokens += d.input_tokens;
+        dailyAgg[d.date].output_tokens += d.output_tokens;
+        dailyAgg[d.date].cache_read_tokens += d.cache_read_tokens;
+        dailyAgg[d.date].cache_create_tokens += d.cache_create_tokens;
+        dailyAgg[d.date].api_calls += d.api_calls;
+      }
+    }
+  }
+
+  // Build last 30 days array
+  const today = new Date();
+  const last30 = [];
+  for (let i = 29; i >= 0; i--) {
+    const dt = new Date(today);
+    dt.setDate(dt.getDate() - i);
+    const key = dt.toISOString().slice(0, 10);
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const label = dayNames[dt.getDay()] + ' ' + monthNames[dt.getMonth()] + ' ' + dt.getDate();
+    const data = dailyAgg[key] || null;
+    const total = data ? (data.input_tokens + data.output_tokens + data.cache_read_tokens + data.cache_create_tokens) : 0;
+    last30.push({ date: key, label, total, data });
+  }
+
+  const maxDayTokens = Math.max(1, ...last30.map(d => d.total));
+
+  html += '<div class="usage-section timeline-section">';
+  html += '<div class="usage-section-title">Daily Usage <span class="tag">30 days</span></div>';
+  html += '<div class="timeline-chart">';
+  for (const day of last30) {
+    const pct = day.total > 0 ? ((day.total / maxDayTokens) * 100).toFixed(1) : '0';
+    const barClass = day.total > 0 ? 'timeline-bar' : 'timeline-bar empty';
+    html += '<div class="timeline-row">' +
+      '<span class="timeline-date">' + esc(day.label) + '</span>' +
+      '<div class="timeline-bar-bg"><div class="' + barClass + '" style="width:' + pct + '%"></div></div>' +
+      '<span class="timeline-value">' + (day.total > 0 ? formatTokens(day.total) : '-') + '</span>' +
+      '</div>';
+  }
+  html += '</div>'; // timeline-chart
+  html += '</div>'; // usage-section
+
   // Weekly summary cards
   html += '<div class="usage-section">';
   html += '<div class="usage-section-title">This Week <span class="tag">7 days</span></div>';
@@ -2263,28 +2726,104 @@ function renderUsage() {
 
   html += '</div>'; // weekly-cards
 
-  // Weekly limit config
-  html += '<div class="weekly-limit-config">' +
-    '<span>Weekly token limit:</span>' +
-    '<input type="text" id="weeklyLimitInput" placeholder="e.g. 50000000" value="' + (weeklyLimit > 0 ? weeklyLimit : '') + '">' +
-    '<button>Set</button>' +
-    (weeklyLimit > 0 ? '<span>' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) + ' (' + ((totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%)</span>' : '<span>Not configured</span>') +
-    '</div>';
+  // Utilization bars (from Anthropic API) or fallback to manual weekly limit
+  if (utilizationData && utilizationData.available) {
+    html += '<div class="utilization-section">';
+    html += '<div class="usage-section-title" style="margin-top:12px">Rate Limit Utilization</div>';
+
+    const fiveHour = utilizationData.five_hour;
+    const sevenDay = utilizationData.seven_day;
+
+    if (fiveHour && fiveHour.utilization != null) {
+      const pct5 = (fiveHour.utilization * 100);
+      const barCls5 = pct5 > 80 ? 'red' : pct5 > 50 ? 'yellow' : 'green';
+      const reset5 = fiveHour.resets_at ? new Date(fiveHour.resets_at).toLocaleTimeString() : '';
+      html += '<div class="util-row">' +
+        '<span class="util-label">5-Hour Window:</span>' +
+        '<div class="util-bar-bg"><div class="util-bar ' + barCls5 + '" style="width:' + Math.min(100, pct5).toFixed(1) + '%"></div></div>' +
+        '<span class="util-pct">' + pct5.toFixed(0) + '%</span>' +
+        (reset5 ? '<span class="util-reset">resets ' + esc(reset5) + '</span>' : '') +
+        '</div>';
+    }
+
+    if (sevenDay && sevenDay.utilization != null) {
+      const pct7 = (sevenDay.utilization * 100);
+      const barCls7 = pct7 > 80 ? 'red' : pct7 > 50 ? 'yellow' : 'green';
+      const reset7 = sevenDay.resets_at ? new Date(sevenDay.resets_at).toLocaleString() : '';
+      html += '<div class="util-row">' +
+        '<span class="util-label">7-Day Window:</span>' +
+        '<div class="util-bar-bg"><div class="util-bar ' + barCls7 + '" style="width:' + Math.min(100, pct7).toFixed(1) + '%"></div></div>' +
+        '<span class="util-pct">' + pct7.toFixed(0) + '%</span>' +
+        (reset7 ? '<span class="util-reset">resets ' + esc(reset7) + '</span>' : '') +
+        '</div>';
+    }
+
+    html += '</div>';
+  } else {
+    // Fallback: manual weekly limit config
+    html += '<div class="weekly-limit-config">' +
+      '<span>Weekly token limit:</span>' +
+      '<input type="text" id="weeklyLimitInput" placeholder="e.g. 50000000" value="' + (weeklyLimit > 0 ? weeklyLimit : '') + '">' +
+      '<button>Set</button>' +
+      (weeklyLimit > 0 ? '<span>' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) + ' (' + ((totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%)</span>' : '<span>Not configured</span>') +
+      '</div>';
+  }
 
   html += '</div>'; // usage-section
 
-  // Usage by Model table
+  // --- Month selector ---
+  // Collect all available months from all projects
+  const allMonthsSet = new Set();
+  for (const p of usageData) {
+    if (p.monthly) {
+      for (const m of p.monthly) {
+        allMonthsSet.add(m.month);
+      }
+    }
+  }
+  const allMonthsSorted = Array.from(allMonthsSet).sort().reverse();
+
+  // Helper: check if a session falls within the selected month
+  function sessionInMonth(s, month) {
+    if (!month) return true; // all time
+    const sa = (s.started_at || '').slice(0, 7);
+    const la = (s.last_api_call_at || '').slice(0, 7);
+    return sa === month || la === month;
+  }
+
+  // Filter sessions per project for the selected month
+  function getFilteredSessions(p) {
+    if (!usageSelectedMonth) return p.sessions;
+    return p.sessions.filter(s => sessionInMonth(s, usageSelectedMonth));
+  }
+
+  if (allMonthsSorted.length > 1) {
+    const mNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    html += '<div class="usage-section">';
+    html += '<div class="usage-section-title">Filter by Month</div>';
+    html += '<div class="month-selector">';
+    html += '<button class="month-btn' + (!usageSelectedMonth ? ' active' : '') + '" data-month="">All Time</button>';
+    for (const m of allMonthsSorted) {
+      const [y, mo] = m.split('-');
+      const label = mNames[parseInt(mo, 10) - 1] + ' ' + y;
+      html += '<button class="month-btn' + (usageSelectedMonth === m ? ' active' : '') + '" data-month="' + m + '">' + esc(label) + '</button>';
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // Usage by Model table (filtered by month)
   const allModels = {};
   for (const p of usageData) {
-    if (p.by_model) {
-      for (const [model, usage] of Object.entries(p.by_model)) {
-        if (!allModels[model]) allModels[model] = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 };
-        allModels[model].input_tokens += usage.input_tokens;
-        allModels[model].output_tokens += usage.output_tokens;
-        allModels[model].cache_read_tokens += usage.cache_read_tokens;
-        allModels[model].cache_create_tokens += usage.cache_create_tokens;
-        allModels[model].api_calls += usage.api_calls;
-      }
+    const filteredSessions = getFilteredSessions(p);
+    for (const s of filteredSessions) {
+      const model = s.model || 'unknown';
+      if (!allModels[model]) allModels[model] = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0, api_calls: 0 };
+      allModels[model].input_tokens += s.input_tokens;
+      allModels[model].output_tokens += s.output_tokens;
+      allModels[model].cache_read_tokens += s.cache_read_tokens;
+      allModels[model].cache_create_tokens += s.cache_create_tokens;
+      allModels[model].api_calls += s.api_calls;
     }
   }
 
@@ -2337,7 +2876,7 @@ function renderUsage() {
     html += '</div>'; // usage-section
   }
 
-  // Per-project table
+  // Per-project table (filtered by month)
   html += '<div class="usage-section">';
   html += '<div class="usage-section-title">All Projects <span class="tag">' + usageData.length + ' projects</span></div>';
 
@@ -2355,29 +2894,41 @@ function renderUsage() {
   let grandTotal = { sessions: 0, input: 0, output: 0, cacheRead: 0, cacheCreate: 0, cost: 0 };
 
   for (const p of usageData) {
-    const cost = calcProjectCost(p);
-    grandTotal.sessions += p.sessions.length;
-    grandTotal.input += p.totals.input_tokens;
-    grandTotal.output += p.totals.output_tokens;
-    grandTotal.cacheRead += p.totals.cache_read_tokens;
-    grandTotal.cacheCreate += p.totals.cache_create_tokens;
-    grandTotal.cost += cost;
+    const filteredSessions = getFilteredSessions(p);
+    if (usageSelectedMonth && filteredSessions.length === 0) continue;
+
+    const projTotals = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_create_tokens: 0 };
+    let projCost = 0;
+    for (const s of filteredSessions) {
+      projTotals.input_tokens += s.input_tokens;
+      projTotals.output_tokens += s.output_tokens;
+      projTotals.cache_read_tokens += s.cache_read_tokens;
+      projTotals.cache_create_tokens += s.cache_create_tokens;
+      projCost += calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
+    }
+
+    grandTotal.sessions += filteredSessions.length;
+    grandTotal.input += projTotals.input_tokens;
+    grandTotal.output += projTotals.output_tokens;
+    grandTotal.cacheRead += projTotals.cache_read_tokens;
+    grandTotal.cacheCreate += projTotals.cache_create_tokens;
+    grandTotal.cost += projCost;
 
     const expanded = usageExpanded[p.project_id];
 
     html += '<tr>' +
       '<td><button class="expand-btn" data-pid="' + esc(p.project_id) + '">' + (expanded ? '[-]' : '[+]') + '</button></td>' +
       '<td class="project-name">' + esc(p.project_name) + '</td>' +
-      '<td class="num">' + p.sessions.length + '</td>' +
-      '<td class="num">' + formatTokens(p.totals.input_tokens) + '</td>' +
-      '<td class="num">' + formatTokens(p.totals.output_tokens) + '</td>' +
-      '<td class="num">' + formatTokens(p.totals.cache_read_tokens) + '</td>' +
-      '<td class="num">' + formatTokens(p.totals.cache_create_tokens) + '</td>' +
-      '<td class="num ' + costClass(cost) + '">' + formatCost(cost) + '</td>' +
+      '<td class="num">' + filteredSessions.length + '</td>' +
+      '<td class="num">' + formatTokens(projTotals.input_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(projTotals.output_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(projTotals.cache_read_tokens) + '</td>' +
+      '<td class="num">' + formatTokens(projTotals.cache_create_tokens) + '</td>' +
+      '<td class="num ' + costClass(projCost) + '">' + formatCost(projCost) + '</td>' +
       '</tr>';
 
     if (expanded) {
-      for (const s of p.sessions) {
+      for (const s of filteredSessions) {
         const sCost = calcCost(s.input_tokens, s.output_tokens, s.cache_read_tokens, s.cache_create_tokens, s.model);
         const shortSid = s.session_id.length > 20 ? s.session_id.slice(0,8) + '..' + s.session_id.slice(-6) : s.session_id;
         const timeStr = s.last_api_call_at ? s.last_api_call_at.slice(0,16).replace('T',' ') : '';
@@ -2415,6 +2966,14 @@ function renderUsage() {
   // Bind expand buttons
   el.querySelectorAll('.expand-btn[data-pid]').forEach(btn => {
     btn.onclick = () => toggleProjectSessions(btn.dataset.pid);
+  });
+
+  // Bind monthly filter buttons
+  el.querySelectorAll('.month-btn[data-month]').forEach(btn => {
+    btn.onclick = () => {
+      usageSelectedMonth = btn.dataset.month || null;
+      renderUsage();
+    };
   });
 
   // Bind weekly limit button
