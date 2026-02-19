@@ -1,6 +1,6 @@
 # GlobalContext
 
-Event-sourced context store for Claude Code sessions. Captures every hook event as immutable JSON and provides projection-based queries for context recovery.
+Event-sourced context store for Claude Code sessions. Captures every hook event as immutable JSON and provides projection-based queries for context recovery, a live dashboard with token usage analytics, and a `/recall` skill for cross-session memory.
 
 ## Features
 
@@ -11,6 +11,12 @@ Event-sourced context store for Claude Code sessions. Captures every hook event 
 - Five projection types for flexible context retrieval
 - Automatic context injection after compaction/clear
 - Progressive summarization for large sessions
+- **Web dashboard** with live event feed, rich event formatting, and SSE streaming
+- **Token usage analytics** — per-project, per-model, daily timeline, monthly views
+- **OAuth utilization** — real-time 5-hour and 7-day usage percentage from Anthropic API
+- **`/recall` skill** — cross-session memory retrieval directly from Claude Code
+- **Live event monitor** — `gc-query watch` streams events in real time
+- System prompt filtering — separates system-injected messages from real user prompts
 - Zero external dependencies (no npm install)
 - Claude Code marketplace plugin
 
@@ -58,6 +64,9 @@ gc-query sessions
 # Get context from most recent session
 gc-query last
 
+# Get context from the most recent *ended* session (skips active)
+gc-query previous
+
 # Get context from a specific session
 gc-query session abc-123
 
@@ -69,7 +78,55 @@ gc-query events abc-123
 
 # Replay session as a narrative
 gc-query replay abc-123
+
+# Live event monitor (auto-discovers latest session)
+gc-query watch
+
+# Follow session chain (parent sessions)
+gc-query last --include-parent
 ```
+
+### Dashboard
+
+```bash
+# Start the dashboard (default port 4000)
+gc-dashboard start
+
+# Open in browser
+open http://localhost:4000
+
+# Lifecycle commands
+gc-dashboard status
+gc-dashboard restart
+gc-dashboard stop
+```
+
+The dashboard provides:
+- **Event feed** — browse projects, sessions, and events with rich formatting
+- **Live streaming** — SSE-based real-time event updates
+- **Token usage** — per-project, per-model breakdown with cost estimation
+- **Daily timeline** — 30-day bar chart of token usage
+- **Monthly views** — filter all data by month
+- **Utilization** — real-time 5-hour/7-day usage from Anthropic OAuth API
+- **System prompt detection** — task notifications and system reminders shown with proper icons
+
+### /recall Skill
+
+Use `/recall` in any Claude Code session to retrieve context from previous sessions:
+
+```
+/recall              # Last session context for this project
+/recall --chain      # Follow session chain to parent sessions
+/recall --search auth  # Search across all sessions
+```
+
+## Screenshots
+
+### Event Feed
+![Event Feed](docs/screenshot-events.png)
+
+### Token Usage Analytics
+![Usage Analytics](docs/screenshot-usage.png)
 
 ## Architecture Overview
 
@@ -111,7 +168,8 @@ Claude Code Session
 | `gc-doctor` | Run health checks and verify installation |
 | `gc-hook` | Hook wrapper (called by Claude Code) |
 | `gc-install-hooks` | Register/unregister hooks in `settings.json` |
-| `gc-query` | Query interface (10 subcommands) |
+| `gc-query` | Query interface (12 subcommands) |
+| `gc-dashboard` | Web dashboard with usage analytics (`start\|stop\|restart\|status`) |
 | `capture-event` | Event capture script (called by gc-hook) |
 | `project` | Projection engine (builds read models) |
 
@@ -124,10 +182,12 @@ Claude Code Session
 | `events <session-id>` | Output raw events as JSONL |
 | `tail <session-id> [N]` | Show last N events from a session (default: 20) |
 | `last` | Get context from most recent session |
+| `previous` | Get context from most recent *ended* session (skips active) |
 | `session <session-id>` | Get context from a specific session |
 | `sessions` | List all sessions with metadata |
 | `search <keyword>` | Search across sessions for events containing keyword |
 | `replay <session-id>` | Transform events into human-readable narrative |
+| `watch [session-id]` | Live event monitor with auto-discovery |
 | `doctor` | Run end-to-end health validation |
 
 ### Common Flags
@@ -192,6 +252,7 @@ Claude Code Session
 │   ├── gc-doctor
 │   ├── gc-install
 │   ├── gc-uninstall
+│   ├── gc-dashboard
 │   └── project
 ├── lib/                              Shared libraries
 │   ├── paths.sh
@@ -206,7 +267,11 @@ Claude Code Session
 │   ├── projection_store.sh
 │   ├── prerequisites.sh
 │   ├── debug_log.sh
+│   ├── context_loader.sh
+│   ├── format_context.sh
+│   ├── deploy.sh
 │   └── hook-config.json
+├── .dashboard.pid                    Dashboard PID file (when running)
 ├── config.json                       Store configuration
 └── VERSION                           Software version (1.0.0)
 ```
@@ -250,6 +315,9 @@ bash tests/00-install-uninstall.sh
 
 # Run all tests
 bash tests/00-install-all.sh
+
+# Dashboard e2e tests (requires dashboard running on :4000)
+npx playwright test
 ```
 
 ### Project Structure
@@ -257,29 +325,18 @@ bash tests/00-install-all.sh
 ```
 /home/meywd/GlobalContext/
 ├── src/                      Source files (deployed to ~/.claude-context/)
-│   ├── bin/                  Executable scripts
-│   └── lib/                  Shared libraries
+│   ├── bin/                  Executable scripts (gc-install, gc-query, gc-dashboard, etc.)
+│   ├── lib/                  Shared libraries (context_loader, format_context, deploy, etc.)
+│   ├── projections/          Projection handlers and lib (.mjs modules)
+│   └── skills/               Claude Code skills (/recall)
+├── plugin/                   Claude Code marketplace plugin
 ├── docs/                     Documentation
-│   ├── ARCHITECTURE.md       System overview
-│   ├── DESIGN-AMENDMENTS.md  Post-review design changes
-│   └── REVIEW.md            Review issues and resolutions
-├── stories/                  Feature specifications
-│   ├── 00-installation.md
-│   ├── 01-event-capture.md
-│   ├── 02-hook-integration.md
-│   ├── 03-storage-layer.md
-│   ├── 04-projection-engine.md
-│   ├── 05-context-recovery.md
-│   └── 06-plugin-packaging.md
-├── plans/                    Implementation plans
-│   ├── 00-installation-plan.md
-│   ├── 01-event-capture-plan.md
-│   ├── 02-hook-integration-plan.md
-│   ├── 03-storage-layer-plan.md
-│   ├── 04-projection-engine-plan.md
-│   ├── 05-context-recovery-plan.md
-│   └── 06-plugin-packaging-plan.md
+├── stories/                  Feature specifications (01-06)
+├── plans/                    Implementation plans (00-06)
 ├── tests/                    Test suite
+│   ├── e2e/                  Playwright dashboard tests
+│   └── lib/                  Unit tests
+├── playwright.config.mjs     Playwright configuration
 └── VERSION                   Software version
 ```
 
