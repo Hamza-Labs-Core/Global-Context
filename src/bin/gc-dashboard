@@ -8,7 +8,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, writeFile, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
@@ -878,6 +878,25 @@ async function getProjectUsage(projectId) {
 
 // --- Utilization API ---
 
+// --- Dashboard config (server-side persistence) ---
+const DASHBOARD_CONFIG_PATH = path.join(GC_ROOT, '.dashboard-config.json');
+
+async function loadDashboardConfig() {
+  try {
+    const raw = await readFile(DASHBOARD_CONFIG_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function saveDashboardConfig(config) {
+  const existing = await loadDashboardConfig();
+  const merged = { ...existing, ...config };
+  await writeFile(DASHBOARD_CONFIG_PATH, JSON.stringify(merged, null, 2) + '\n');
+  return merged;
+}
+
 let utilizationCache = { data: null, fetchedAt: 0 };
 
 async function fetchUtilization() {
@@ -993,9 +1012,29 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, events);
     }
 
+    // --- Dashboard config API ---
+    if (pathname === '/api/config') {
+      if (req.method === 'POST' || req.method === 'PUT') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        try {
+          const updates = JSON.parse(body);
+          const config = await saveDashboardConfig(updates);
+          return sendJson(res, config);
+        } catch {
+          return sendJson(res, { error: 'Invalid JSON' }, 400);
+        }
+      }
+      const config = await loadDashboardConfig();
+      return sendJson(res, config);
+    }
+
     // --- Utilization API ---
     if (pathname === '/api/usage/utilization') {
       const util = await fetchUtilization();
+      // Merge server-side config (weekly_limit) into response
+      const config = await loadDashboardConfig();
+      util.weekly_limit = config.weekly_limit || 0;
       return sendJson(res, util);
     }
 
@@ -1558,17 +1597,26 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .progress-bar-fill.warn { background: var(--orange); }
   .progress-bar-fill.danger { background: var(--red); }
 
+  .weekly-budget-bar {
+    margin: 8px 0 4px;
+  }
+  .weekly-budget-label {
+    font-size: 13px;
+    margin-bottom: 4px;
+  }
+
   .weekly-limit-config {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-top: 12px;
+    gap: 6px;
+    margin-top: 10px;
     font-size: 12px;
     color: var(--text2);
+    flex-wrap: wrap;
   }
 
   .weekly-limit-config input {
-    width: 120px;
+    width: 80px;
     padding: 4px 8px;
     font-size: 12px;
     font-family: inherit;
@@ -1583,7 +1631,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     border-color: var(--accent);
   }
 
-  .weekly-limit-config button {
+  .preset-btn, .weekly-limit-config button {
     padding: 4px 10px;
     font-size: 11px;
     font-family: inherit;
@@ -1594,8 +1642,14 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     cursor: pointer;
   }
 
-  .weekly-limit-config button:hover {
+  .preset-btn:hover, .weekly-limit-config button:hover {
     background: var(--border);
+  }
+
+  .preset-btn.active {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
   }
 
   .usage-loading {
@@ -2576,19 +2630,17 @@ function costClass(c) {
 }
 
 function getWeeklyLimit() {
-  try {
-    const v = localStorage.getItem('gc_weekly_token_limit');
-    return v ? parseInt(v, 10) : 0;
-  } catch { return 0; }
+  return utilizationData?.weekly_limit || 0;
 }
 
-function setWeeklyLimit(v) {
+async function saveWeeklyLimitToServer(v) {
   try {
-    if (v && v > 0) {
-      localStorage.setItem('gc_weekly_token_limit', v.toString());
-    } else {
-      localStorage.removeItem('gc_weekly_token_limit');
-    }
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekly_limit: v > 0 ? v : 0 }),
+    });
+    if (utilizationData) utilizationData.weekly_limit = v > 0 ? v : 0;
   } catch {}
 }
 
@@ -2726,7 +2778,7 @@ function renderUsage() {
 
   html += '</div>'; // weekly-cards
 
-  // Utilization bars (from Anthropic API) or fallback to manual weekly limit
+  // Utilization bars (from Anthropic API if available)
   if (utilizationData && utilizationData.available) {
     html += '<div class="utilization-section">';
     html += '<div class="usage-section-title" style="margin-top:12px">Rate Limit Utilization</div>';
@@ -2759,15 +2811,36 @@ function renderUsage() {
     }
 
     html += '</div>';
-  } else {
-    // Fallback: manual weekly limit config
-    html += '<div class="weekly-limit-config">' +
-      '<span>Weekly token limit:</span>' +
-      '<input type="text" id="weeklyLimitInput" placeholder="e.g. 50000000" value="' + (weeklyLimit > 0 ? weeklyLimit : '') + '">' +
-      '<button>Set</button>' +
-      (weeklyLimit > 0 ? '<span>' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) + ' (' + ((totalWeeklyTokens/weeklyLimit)*100).toFixed(1) + '%)</span>' : '<span>Not configured</span>') +
+  }
+
+  // Weekly token budget — always shown, server-persisted
+  html += '<div class="weekly-limit-section">';
+  html += '<div class="usage-section-title" style="margin-top:12px">Weekly Token Budget</div>';
+
+  if (weeklyLimit > 0) {
+    const pctUsed = (totalWeeklyTokens / weeklyLimit) * 100;
+    const barCls = pctUsed > 90 ? 'danger' : pctUsed > 70 ? 'warn' : '';
+    html += '<div class="weekly-budget-bar">' +
+      '<div class="weekly-budget-label">' + formatTokens(totalWeeklyTokens) + ' / ' + formatTokens(weeklyLimit) +
+      ' <span style="color:var(--text2)">(' + pctUsed.toFixed(1) + '%)</span></div>' +
+      '<div class="progress-bar-bg" style="height:10px"><div class="progress-bar-fill ' + barCls +
+      '" style="width:' + Math.min(100, pctUsed).toFixed(1) + '%"></div></div>' +
       '</div>';
   }
+
+  // Plan presets
+  html += '<div class="weekly-limit-config">' +
+    '<span>Set budget:</span>' +
+    '<button class="preset-btn" data-limit="0">None</button>' +
+    '<button class="preset-btn' + (weeklyLimit === 5000000 ? ' active' : '') + '" data-limit="5000000">5M</button>' +
+    '<button class="preset-btn' + (weeklyLimit === 25000000 ? ' active' : '') + '" data-limit="25000000">25M</button>' +
+    '<button class="preset-btn' + (weeklyLimit === 50000000 ? ' active' : '') + '" data-limit="50000000">50M</button>' +
+    '<button class="preset-btn' + (weeklyLimit === 100000000 ? ' active' : '') + '" data-limit="100000000">100M</button>' +
+    '<input type="text" id="weeklyLimitInput" placeholder="Custom" value="' + (weeklyLimit > 0 && ![5000000,25000000,50000000,100000000].includes(weeklyLimit) ? weeklyLimit : '') + '" style="width:80px">' +
+    '<button id="weeklyLimitSetBtn">Set</button>' +
+    '</div>';
+
+  html += '</div>'; // weekly-limit-section
 
   html += '</div>'; // usage-section
 
@@ -2976,21 +3049,28 @@ function renderUsage() {
     };
   });
 
-  // Bind weekly limit button
-  const limitBtn = el.querySelector('.weekly-limit-config button');
-  if (limitBtn) limitBtn.onclick = saveWeeklyLimit;
+  // Bind preset buttons
+  el.querySelectorAll('.preset-btn[data-limit]').forEach(btn => {
+    btn.onclick = async () => {
+      const val = parseInt(btn.dataset.limit, 10);
+      await saveWeeklyLimitToServer(val);
+      renderUsage();
+    };
+  });
+
+  // Bind custom Set button
+  const setBtn = document.getElementById('weeklyLimitSetBtn');
+  if (setBtn) setBtn.onclick = async () => {
+    const input = document.getElementById('weeklyLimitInput');
+    if (!input) return;
+    const val = parseInt(input.value.replace(/[^0-9]/g, ''), 10);
+    await saveWeeklyLimitToServer(val || 0);
+    renderUsage();
+  };
 }
 
 function toggleProjectSessions(projectId) {
   usageExpanded[projectId] = !usageExpanded[projectId];
-  renderUsage();
-}
-
-function saveWeeklyLimit() {
-  const input = document.getElementById('weeklyLimitInput');
-  if (!input) return;
-  const val = parseInt(input.value.replace(/[^0-9]/g, ''), 10);
-  setWeeklyLimit(val || 0);
   renderUsage();
 }
 
