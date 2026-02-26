@@ -26,8 +26,8 @@ Event-sourced context store for Claude Code sessions. Captures every hook event 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/GlobalContext.git
-cd GlobalContext
+git clone https://github.com/Hamza-Labs-Core/Global-Context.git
+cd Global-Context
 
 # Run the installer
 ./gc-install
@@ -270,6 +270,12 @@ Claude Code Session
 │   ├── context_loader.sh
 │   ├── format_context.sh
 │   ├── deploy.sh
+│   ├── projection_check.sh
+│   ├── rejected.sh
+│   ├── session_chain.sh
+│   ├── session_read.sh
+│   ├── session_resolve.sh
+│   ├── version.sh
 │   └── hook-config.json
 ├── .dashboard.pid                    Dashboard PID file (when running)
 ├── config.json                       Store configuration
@@ -323,7 +329,7 @@ npx playwright test
 ### Project Structure
 
 ```
-/home/meywd/GlobalContext/
+Global-Context/
 ├── src/                      Source files (deployed to ~/.claude-context/)
 │   ├── bin/                  Executable scripts (gc-install, gc-query, gc-dashboard, etc.)
 │   ├── lib/                  Shared libraries (context_loader, format_context, deploy, etc.)
@@ -331,7 +337,7 @@ npx playwright test
 │   └── skills/               Claude Code skills (/recall)
 ├── plugin/                   Claude Code marketplace plugin
 ├── docs/                     Documentation
-├── stories/                  Feature specifications (01-06)
+├── stories/                  Feature specifications (00-06)
 ├── plans/                    Implementation plans (00-06)
 ├── tests/                    Test suite
 │   ├── e2e/                  Playwright dashboard tests
@@ -347,6 +353,10 @@ npx playwright test
 3. **Separation of Concerns (CQRS)** — Write side is fast and dumb. Read side is smart and flexible.
 4. **Zero Friction** — Hooks run async where possible, never slowing down the LLM session.
 5. **Self-Describing** — Events carry all context needed to understand them without external state.
+
+## Related
+
+GlobalContext is the event store foundation for [Saqr](https://github.com/Hamza-Labs-Core/saqr) — an agent management platform by [Hamza Labs](https://github.com/Hamza-Labs-Core).
 
 ## License
 
