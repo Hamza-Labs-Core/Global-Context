@@ -1826,6 +1826,22 @@ _gc_query_doctor() {
     _doctor_report "PASS" "No stale global files"
   fi
 
+  # 15. Search index status
+  if [[ -f "$GC_SEARCH_DB" ]]; then
+    local indexed_count=0 db_size_human=""
+    if command -v sqlite3 &>/dev/null; then
+      indexed_count="$(sqlite3 "$GC_SEARCH_DB" "SELECT COUNT(*) FROM events_meta;" 2>/dev/null || echo 0)"
+    fi
+    local db_bytes
+    db_bytes="$(stat -c %s "$GC_SEARCH_DB" 2>/dev/null || echo 0)"
+    db_size_human="$(_gc_format_size "$db_bytes")"
+    _doctor_report "PASS" "Search index: ${indexed_count} events indexed (${db_size_human})"
+  elif _gc_has_fts5; then
+    _doctor_report "WARN" "Search index: search.db not found. Run: gc-init or gc-query reindex"
+  else
+    _doctor_report "WARN" "Search index: sqlite3 with FTS5 not available. Download from sqlite.org/download.html"
+  fi
+
   # Summary
   if [[ "$format" == "json" ]]; then
     jq -n \
