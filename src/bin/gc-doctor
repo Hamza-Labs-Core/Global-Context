@@ -347,12 +347,36 @@ _gather_diagnostics() {
     orphan_count=$(find "$GC_BASE/events" -name '*.tmp.*' 2>/dev/null | wc -l || echo 0)
   fi
 
+  # Search index diagnostics
+  local search_db="$GC_BASE/search.db"
+  local search_db_exists=false
+  local search_db_size=0
+  local search_indexed=0
+  local search_fts5=false
+
+  if [ -f "$search_db" ]; then
+    search_db_exists=true
+    search_db_size=$(stat -c %s "$search_db" 2>/dev/null || echo 0)
+    if command -v sqlite3 &>/dev/null; then
+      search_indexed=$(sqlite3 "$search_db" "SELECT COUNT(*) FROM events_meta;" 2>/dev/null || echo 0)
+      if sqlite3 ':memory:' "CREATE VIRTUAL TABLE _t USING fts5(c);" 2>/dev/null; then
+        search_fts5=true
+      fi
+    fi
+  elif command -v sqlite3 &>/dev/null && sqlite3 ':memory:' "CREATE VIRTUAL TABLE _t USING fts5(c);" 2>/dev/null; then
+    search_fts5=true
+  fi
+
   # Store diagnostics as global vars for output
   DIAG_STORE_SIZE_BYTES="$store_size"
   DIAG_SESSION_COUNT="$session_count"
   DIAG_EVENT_COUNT="$event_count"
   DIAG_PROJECT_COUNT="$project_count"
   DIAG_ORPHAN_COUNT="$orphan_count"
+  DIAG_SEARCH_DB_EXISTS="$search_db_exists"
+  DIAG_SEARCH_DB_SIZE="$search_db_size"
+  DIAG_SEARCH_INDEXED="$search_indexed"
+  DIAG_SEARCH_FTS5="$search_fts5"
 }
 
 # ---------------------------------------------------------------------------
@@ -416,6 +440,29 @@ _output_text() {
   printf "  %-30s %s\n" "Total events" "$DIAG_EVENT_COUNT"
   printf "  %-30s %s\n" "Orphan temp files" "$DIAG_ORPHAN_COUNT"
 
+  # Search index info
+  if [[ "$DIAG_SEARCH_DB_EXISTS" == "true" ]]; then
+    local db_size_human
+    if [ "$DIAG_SEARCH_DB_SIZE" -ge 1048576 ] 2>/dev/null; then
+      db_size_human="$(awk "BEGIN { printf \"%.1f MB\", $DIAG_SEARCH_DB_SIZE / 1048576 }")"
+    elif [ "$DIAG_SEARCH_DB_SIZE" -ge 1024 ] 2>/dev/null; then
+      db_size_human="$(awk "BEGIN { printf \"%.1f KB\", $DIAG_SEARCH_DB_SIZE / 1024 }")"
+    else
+      db_size_human="${DIAG_SEARCH_DB_SIZE} B"
+    fi
+    local coverage=""
+    if [ "$DIAG_EVENT_COUNT" -gt 0 ] 2>/dev/null && [ "$DIAG_SEARCH_INDEXED" -gt 0 ] 2>/dev/null; then
+      local pct
+      pct=$(awk "BEGIN { printf \"%.0f\", ($DIAG_SEARCH_INDEXED / $DIAG_EVENT_COUNT) * 100 }")
+      coverage=" (${pct}% of events)"
+    fi
+    printf "  %-30s %s indexed, %s%s\n" "Search index" "$DIAG_SEARCH_INDEXED" "$db_size_human" "$coverage"
+  elif [[ "$DIAG_SEARCH_FTS5" == "true" ]]; then
+    printf "  %-30s %s\n" "Search index" "not created (run gc-init or gc-query reindex)"
+  else
+    printf "  %-30s %s\n" "Search index" "unavailable (sqlite3 with FTS5 not found)"
+  fi
+
   echo ""
   if [[ "$OVERALL" == "pass" ]]; then
     echo "Result: ALL CHECKS PASSED"
@@ -461,6 +508,10 @@ _output_json() {
     --argjson project_count "${DIAG_PROJECT_COUNT:-0}" \
     --argjson event_count "${DIAG_EVENT_COUNT:-0}" \
     --argjson orphan_temp_files "${DIAG_ORPHAN_COUNT:-0}" \
+    --argjson search_db_exists "${DIAG_SEARCH_DB_EXISTS:-false}" \
+    --argjson search_db_size "${DIAG_SEARCH_DB_SIZE:-0}" \
+    --argjson search_indexed "${DIAG_SEARCH_INDEXED:-0}" \
+    --argjson search_fts5 "${DIAG_SEARCH_FTS5:-false}" \
     --arg overall "$OVERALL" \
     '{
       store_path: $store_path,
@@ -471,7 +522,13 @@ _output_json() {
         session_count: $session_count,
         project_count: $project_count,
         event_count: $event_count,
-        orphan_temp_files: $orphan_temp_files
+        orphan_temp_files: $orphan_temp_files,
+        search_index: {
+          exists: $search_db_exists,
+          size_bytes: $search_db_size,
+          events_indexed: $search_indexed,
+          fts5_available: $search_fts5
+        }
       },
       overall: $overall
     }'
