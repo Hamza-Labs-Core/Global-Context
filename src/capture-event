@@ -286,6 +286,53 @@ update_latest_symlink() {
   fi
 }
 
+# === FTS5 search index: async single-event indexing ===
+GC_SEARCH_DB="$BASE_DIR/search.db"
+
+_gc_index_event_inline() {
+  local p_id="$1" s_id="$2" seq="$3" etype="$4" ts="$5" envelope="$6"
+
+  [ -f "$GC_SEARCH_DB" ] || return 0
+
+  # Extract searchable content based on event type
+  local content=""
+  case "$etype" in
+    UserPromptReceived)
+      content=$(printf '%s' "$envelope" | jq -r '.data.prompt // .data.message // ""' 2>/dev/null) ;;
+    ToolCallCompleted)
+      content=$(printf '%s' "$envelope" | jq -r '[.data.tool_name // "", (.data.tool_result // "" | tostring | .[:500])] | join(" ")' 2>/dev/null) ;;
+    ToolCallRequested)
+      content=$(printf '%s' "$envelope" | jq -r '[.data.tool_name // "", (.data.tool_input // "" | tostring | .[:500])] | join(" ")' 2>/dev/null) ;;
+    ToolCallFailed)
+      content=$(printf '%s' "$envelope" | jq -r '[.data.tool_name // "", .data.error // ""] | join(" ")' 2>/dev/null) ;;
+    SessionStarted)
+      content=$(printf '%s' "$envelope" | jq -r '.data.cwd // ""' 2>/dev/null) ;;
+    *)
+      content=$(printf '%s' "$envelope" | jq -r '[.data | .. | strings] | join(" ") | .[:1000]' 2>/dev/null) ;;
+  esac
+
+  [ -z "$content" ] && return 0
+
+  local snippet="${content:0:200}"
+
+  # Escape single quotes for SQL
+  p_id="${p_id//\'/\'\'}"
+  s_id="${s_id//\'/\'\'}"
+  etype="${etype//\'/\'\'}"
+  ts="${ts//\'/\'\'}"
+  snippet="${snippet//\'/\'\'}"
+  content="${content//\'/\'\'}"
+
+  sqlite3 "$GC_SEARCH_DB" <<SQL 2>/dev/null || true
+INSERT OR IGNORE INTO events_meta (project_id, session_id, sequence, event_type, timestamp, snippet)
+VALUES ('$p_id', '$s_id', $seq, '$etype', '$ts', '$snippet');
+INSERT INTO events_fts (rowid, content)
+SELECT rowid, '$content'
+FROM events_meta
+WHERE project_id = '$p_id' AND session_id = '$s_id' AND sequence = $seq;
+SQL
+}
+
 # === Task 08: Extract session_id and build envelope ===
 # First jq call: extract session_id from payload
 malformed_json=false
@@ -369,6 +416,11 @@ if [ "$has_flock" = true ]; then
     # Update session.json within flock scope (Amendment 2)
     update_session_meta "$SESSION_DIR" "$session_id" "$project_id" "$event_type" "$timestamp" "$payload" || true
 
+    # Async FTS5 indexing (fire-and-forget)
+    if command -v sqlite3 &>/dev/null && [ -f "$GC_SEARCH_DB" ]; then
+      ( _gc_index_event_inline "$project_id" "$session_id" "$next_seq" "$event_type" "$timestamp" "$envelope_json" ) &
+    fi
+
   ) 200>"$LOCK_FILE"
 else
   # No flock: best-effort write with random suffix to mitigate collisions
@@ -410,6 +462,11 @@ else
 
   # Update session.json best-effort without flock (Amendment 2)
   update_session_meta "$SESSION_DIR" "$session_id" "$project_id" "$event_type" "$timestamp" "$payload" || true
+
+  # Async FTS5 indexing (fire-and-forget)
+  if command -v sqlite3 &>/dev/null && [ -f "$GC_SEARCH_DB" ]; then
+    ( _gc_index_event_inline "$project_id" "$session_id" "$next_seq" "$event_type" "$timestamp" "$envelope_json" ) &
+  fi
 fi
 
 exit 0

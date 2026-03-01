@@ -1063,6 +1063,49 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, results);
     }
 
+    // --- Search API ---
+    if (pathname === '/api/search') {
+      const q = url.searchParams.get('q') || '';
+      const project = url.searchParams.get('project') || '';
+      const type = url.searchParams.get('type') || '';
+      const limit = url.searchParams.get('limit') || '20';
+      const offset = url.searchParams.get('offset') || '0';
+      if (!q) return sendJson(res, { error: 'q param required' }, 400);
+
+      try {
+        const { execSync } = await import('node:child_process');
+        const basePath = getBasePath();
+        const searchDb = path.join(basePath, 'search.db');
+
+        // Try FTS5 path first
+        let results;
+        try {
+          const fs = await import('node:fs');
+          fs.accessSync(searchDb);
+
+          // Build SQL query
+          const escapedQ = q.replace(/'/g, "''").replace(/"/g, '""');
+          let where = '';
+          if (project) where += ` AND m.project_id = '${project.replace(/'/g, "''")}'`;
+          if (type) where += ` AND m.event_type = '${type.replace(/'/g, "''")}'`;
+
+          const sql = `SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet FROM events_fts f JOIN events_meta m ON f.rowid = m.rowid WHERE events_fts MATCH '"${escapedQ}"' ${where} ORDER BY rank LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)};`;
+          const raw = execSync(`sqlite3 -json '${searchDb.replace(/'/g, "'\\''")}' "${sql.replace(/"/g, '\\"')}"`, { timeout: 10000, encoding: 'utf-8' });
+          results = raw.trim() ? JSON.parse(raw) : [];
+        } catch {
+          // Fallback to gc-query search
+          let cmd = `gc-query search "${q.replace(/"/g, '\\"')}" --format json --limit ${parseInt(limit)}`;
+          if (project) cmd += ` --all-projects`;
+          if (type) cmd += ` --type "${type.replace(/"/g, '\\"')}"`;
+          const raw = execSync(cmd, { timeout: 10000, encoding: 'utf-8', env: { ...process.env, CLAUDE_CONTEXT_PATH: basePath } });
+          results = raw.trim() ? JSON.parse(raw) : [];
+        }
+        return sendJson(res, results);
+      } catch (e) {
+        return sendJson(res, { error: 'Search failed: ' + (e.message || 'unknown error') }, 500);
+      }
+    }
+
     // --- SSE stream ---
     if (pathname === '/api/stream') {
       const projectId = url.searchParams.get('project');
@@ -2210,6 +2253,145 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .event-feed tr.ev-row-error:hover {
     background: rgba(248,81,73,0.08);
   }
+
+  /* Search view */
+  .search-view {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: none;
+  }
+
+  .search-view.visible {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .search-controls {
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  .search-input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .search-input-row input {
+    flex: 1;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    background: var(--bg2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    outline: none;
+  }
+
+  .search-input-row input:focus {
+    border-color: var(--accent);
+  }
+
+  .search-input-row button {
+    padding: 8px 16px;
+    font-size: 13px;
+    font-family: inherit;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .search-input-row button:hover {
+    opacity: 0.9;
+  }
+
+  .search-filters {
+    display: flex;
+    gap: 8px;
+  }
+
+  .search-filters select {
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    background: var(--bg2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+
+  .search-results {
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .search-empty, .search-loading, .search-error {
+    text-align: center;
+    color: var(--text2);
+    padding: 40px 20px;
+    font-size: 13px;
+  }
+
+  .search-error { color: var(--red); }
+
+  .search-result-item {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+
+  .search-result-item:hover {
+    background: var(--bg2);
+  }
+
+  .search-result-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+
+  .search-result-type {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 600;
+    text-transform: uppercase;
+    background: var(--bg3);
+    color: var(--accent);
+  }
+
+  .search-result-session {
+    font-size: 11px;
+    color: var(--text2);
+    font-family: monospace;
+  }
+
+  .search-result-time {
+    font-size: 11px;
+    color: var(--text2);
+    margin-left: auto;
+  }
+
+  .search-result-snippet {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .search-result-project {
+    font-size: 10px;
+    color: var(--text2);
+    margin-left: 4px;
+  }
 </style>
 </head>
 <body>
@@ -2221,6 +2403,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="header-tabs">
       <button class="header-tab active" id="tabEvents" onclick="switchView('events')">Events</button>
       <button class="header-tab" id="tabUsage" onclick="switchView('usage')">Usage</button>
+      <button class="header-tab" id="tabSearch" onclick="switchView('search')">Search</button>
     </div>
     <div class="status">
       <div class="dot" id="statusDot"></div>
@@ -2247,6 +2430,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
     <div class="usage-view" id="usageView">
       <div class="usage-loading">Loading usage data...</div>
+    </div>
+    <div class="search-view" id="searchView">
+      <div class="search-controls">
+        <div class="search-input-row">
+          <input type="text" id="searchInput" placeholder="Search events..." autocomplete="off" />
+          <button id="searchBtn" onclick="doSearch()">Search</button>
+        </div>
+        <div class="search-filters">
+          <select id="searchProjectFilter"><option value="">All projects</option></select>
+          <select id="searchTypeFilter">
+            <option value="">All types</option>
+            <option value="UserPromptReceived">Prompts</option>
+            <option value="ToolCallCompleted">Tool Results</option>
+            <option value="ToolCallRequested">Tool Calls</option>
+            <option value="ToolCallFailed">Tool Failures</option>
+            <option value="SessionStarted">Session Start</option>
+            <option value="SessionEnded">Session End</option>
+          </select>
+        </div>
+      </div>
+      <div class="search-results" id="searchResults">
+        <div class="search-empty">Enter a keyword to search across all sessions</div>
+      </div>
     </div>
   </div>
 
@@ -2512,21 +2718,32 @@ function switchView(view) {
   currentView = view;
   const eventsEls = [$('eventFeed'), $('sessionHeader')];
   const usageEl = $('usageView');
+  const searchEl = $('searchView');
   const sidebarEl = $('sidebar');
   const layout = document.querySelector('.layout');
 
   $('tabEvents').className = 'header-tab' + (view === 'events' ? ' active' : '');
   $('tabUsage').className = 'header-tab' + (view === 'usage' ? ' active' : '');
+  $('tabSearch').className = 'header-tab' + (view === 'search' ? ' active' : '');
+
+  // Hide all views first
+  eventsEls.forEach(el => el.style.display = 'none');
+  usageEl.classList.remove('visible');
+  searchEl.classList.remove('visible');
 
   if (view === 'usage') {
-    eventsEls.forEach(el => el.style.display = 'none');
     usageEl.classList.add('visible');
     sidebarEl.style.display = 'none';
     layout.classList.add('full-width');
     loadUsageData();
+  } else if (view === 'search') {
+    searchEl.classList.add('visible');
+    sidebarEl.style.display = 'none';
+    layout.classList.add('full-width');
+    populateSearchFilters();
+    $('searchInput').focus();
   } else {
     eventsEls.forEach(el => el.style.display = '');
-    usageEl.classList.remove('visible');
     sidebarEl.style.display = '';
     layout.classList.remove('full-width');
   }
@@ -2991,6 +3208,93 @@ function toggleProjectSessions(projectId) {
   usageExpanded[projectId] = !usageExpanded[projectId];
   renderUsage();
 }
+
+// --- Search ---
+let searchProjectsLoaded = false;
+
+async function populateSearchFilters() {
+  if (searchProjectsLoaded) return;
+  try {
+    const projects = await api('/api/projects');
+    const sel = $('searchProjectFilter');
+    projects.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.project_id;
+      opt.textContent = p.project_id;
+      sel.appendChild(opt);
+    });
+    searchProjectsLoaded = true;
+  } catch {}
+}
+
+async function doSearch() {
+  const q = $('searchInput').value.trim();
+  if (!q) return;
+
+  const project = $('searchProjectFilter').value;
+  const type = $('searchTypeFilter').value;
+  const resultsEl = $('searchResults');
+  resultsEl.innerHTML = '<div class="search-loading">Searching...</div>';
+
+  try {
+    let url = '/api/search?q=' + encodeURIComponent(q) + '&limit=50';
+    if (project) url += '&project=' + encodeURIComponent(project);
+    if (type) url += '&type=' + encodeURIComponent(type);
+
+    const results = await api(url);
+    renderSearchResults(results, q);
+  } catch (e) {
+    resultsEl.innerHTML = '<div class="search-error">Search failed: ' + escHtmlInline(e.message || 'unknown error') + '</div>';
+  }
+}
+
+function renderSearchResults(results, query) {
+  const el = $('searchResults');
+  if (!results || results.length === 0) {
+    el.innerHTML = '<div class="search-empty">No results found for "' + escHtmlInline(query) + '"</div>';
+    return;
+  }
+
+  el.innerHTML = results.map(r => {
+    const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
+    const projectBadge = r.project_id ? '<span class="search-result-project">' + escHtmlInline(r.project_id) + '</span>' : '';
+    return '<div class="search-result-item" onclick="navigateToSearchResult(\'' +
+      escHtmlInline(r.project_id || '') + '\',\'' + escHtmlInline(r.session_id) + '\')">' +
+      '<div class="search-result-header">' +
+        '<span class="search-result-type">' + escHtmlInline(r.event_type || '') + '</span>' +
+        '<span class="search-result-session">' + escHtmlInline(r.session_id ? r.session_id.slice(0, 12) : '') + '</span>' +
+        projectBadge +
+        '<span class="search-result-time">' + escHtmlInline(time) + '</span>' +
+      '</div>' +
+      '<div class="search-result-snippet">' + escHtmlInline(r.snippet || '') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function escHtmlInline(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function navigateToSearchResult(projectId, sessionId) {
+  // Switch to events view and select the project/session
+  switchView('events');
+  if (projectId && projectId !== state.selectedProject) {
+    state.selectedProject = projectId;
+    state.sessions = await api('/api/sessions?project=' + encodeURIComponent(projectId));
+    renderProjects();
+    renderSessions();
+  }
+  if (sessionId) {
+    await selectSession(sessionId);
+  }
+}
+
+// Enter key triggers search
+document.addEventListener('DOMContentLoaded', () => {
+  const input = $('searchInput');
+  if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+});
 
 // --- Init ---
 loadProjects();

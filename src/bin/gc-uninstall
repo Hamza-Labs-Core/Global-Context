@@ -177,14 +177,14 @@ else
   echo "No GlobalContext hooks found in settings.json."
 fi
 
-# Step 2 -- Remove recall skill
-_gc_skill_dir="$HOME/.claude/skills/recall"
-if [ -d "$_gc_skill_dir" ]; then
-  rm -rf "$_gc_skill_dir"
-  echo "Removed recall skill from $_gc_skill_dir"
-else
-  echo "No recall skill found."
-fi
+# Step 2 -- Remove skills
+for _gc_skill_name in recall gc-search; do
+  _gc_skill_dir="$HOME/.claude/skills/$_gc_skill_name"
+  if [ -d "$_gc_skill_dir" ]; then
+    rm -rf "$_gc_skill_dir"
+    echo "Removed $_gc_skill_name skill from $_gc_skill_dir"
+  fi
+done
 
 # Step 3 -- Handle store
 if [ "$PURGE" = true ]; then

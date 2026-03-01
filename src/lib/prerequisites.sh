@@ -140,6 +140,24 @@ gc_check_prerequisites() {
     PREREQ_MESSAGE[uuidgen]="INFO: uuidgen not found. Using bash-native UUID generation (slightly weaker entropy)."
   fi
 
+  # --- sqlite3 with FTS5 (optional) ---
+  if command -v sqlite3 &>/dev/null; then
+    local sqlite_ver
+    sqlite_ver="$(sqlite3 --version 2>/dev/null | awk '{print $1}')"
+    PREREQ_VERSION[sqlite3]="$sqlite_ver"
+    if sqlite3 ':memory:' "CREATE VIRTUAL TABLE _fts5_test USING fts5(content);" 2>/dev/null; then
+      PREREQ_STATUS[sqlite3]="ok"
+      PREREQ_MESSAGE[sqlite3]="sqlite3 $sqlite_ver (FTS5)"
+    else
+      PREREQ_STATUS[sqlite3]="optional_missing"
+      PREREQ_MESSAGE[sqlite3]="WARN: sqlite3 found but FTS5 extension not available. Search will use grep fallback."
+    fi
+  else
+    PREREQ_STATUS[sqlite3]="optional_missing"
+    PREREQ_VERSION[sqlite3]=""
+    PREREQ_MESSAGE[sqlite3]="INFO: sqlite3 not found. Search will use grep fallback (slower)."
+  fi
+
   if [[ "$all_required_ok" == "true" ]]; then
     return 0
   else
@@ -152,14 +170,14 @@ gc_check_prerequisites() {
 #   Prints a formatted report of prerequisite statuses to stdout.
 # ---------------------------------------------------------------------------
 gc_print_prereq_report() {
-  local names=("bash" "jq" "node" "sha256sum" "flock" "git" "uuidgen")
+  local names=("bash" "jq" "node" "sha256sum" "flock" "git" "uuidgen" "sqlite3")
   for name in "${names[@]}"; do
     local status="${PREREQ_STATUS[$name]:-unknown}"
     local message="${PREREQ_MESSAGE[$name]:-}"
     local indicator
     case "$status" in
       ok)
-        if [[ "$name" == "git" || "$name" == "flock" || "$name" == "uuidgen" ]]; then
+        if [[ "$name" == "git" || "$name" == "flock" || "$name" == "uuidgen" || "$name" == "sqlite3" ]]; then
           indicator="ok (optional)"
         else
           indicator="ok"

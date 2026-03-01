@@ -15,6 +15,7 @@ GC_EVENTS_DIR="$GC_ROOT/events"
 GC_PROJECTIONS_DIR="$GC_ROOT/projections"
 GC_BIN_DIR="$GC_ROOT/bin"
 GC_CONFIG_FILE="$GC_ROOT/config.json"
+GC_SEARCH_DB="$GC_ROOT/search.db"
 # Note: No global sessions.json or .sessions.lock -- per-session metadata only (Amendment 1)
 
 # ---------------------------------------------------------------------------

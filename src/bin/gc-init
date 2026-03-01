@@ -16,6 +16,8 @@ source "$LIB_DIR/paths.sh"
 source "$LIB_DIR/atomic_write.sh"
 # shellcheck source=../lib/config.sh
 source "$LIB_DIR/config.sh"
+# shellcheck source=../lib/search_index.sh
+source "$LIB_DIR/search_index.sh"
 
 # ---------------------------------------------------------------------------
 # Summary tracking
@@ -78,6 +80,18 @@ else
   gc_config_create
   chmod 600 "$GC_CONFIG_FILE"
   _track created "config.json"
+fi
+
+# Step 7b: Create search.db if sqlite3+FTS5 available
+if _gc_has_fts5; then
+  if [[ -f "$GC_SEARCH_DB" ]]; then
+    _track skipped "search.db"
+  else
+    _gc_init_search_db
+    _track created "search.db"
+  fi
+else
+  _track skipped "search.db (sqlite3/FTS5 not available)"
 fi
 
 # Step 8: Install bin/ scripts (always overwrite for upgrades)

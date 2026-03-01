@@ -36,6 +36,8 @@ source "$_GC_LIB_DIR/context_loader.sh"
 source "$_GC_LIB_DIR/format_context.sh"
 # shellcheck source=../lib/session_chain.sh
 source "$_GC_LIB_DIR/session_chain.sh"
+# shellcheck source=../lib/search_index.sh
+source "$_GC_LIB_DIR/search_index.sh"
 
 # ---------------------------------------------------------------------------
 # Early checks (Task 20: jq dependency)
@@ -60,6 +62,7 @@ _gc_query_usage() {
   echo "  tail <session-id> [N] Show last N events (default 20)"
   echo "  replay <session-id>  Transform events into human-readable narrative"
   echo "  search <keyword>     Search across sessions for matching events"
+  echo "  reindex              Rebuild FTS5 search index from all events"
   echo "  status               Show store health and statistics"
   echo "  store-size           Report total event count, size, oldest/newest"
   echo "  watch [session-id]   Live event monitor (Ctrl+C to stop)"
@@ -844,7 +847,7 @@ _gc_query_sessions() {
 # ---------------------------------------------------------------------------
 _gc_query_search() {
   local keyword="" format="text" type_filter="" session_filter="" file_filter=""
-  local case_sensitive=false limit=20
+  local case_sensitive=false limit=20 offset=0 all_projects=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -854,7 +857,9 @@ _gc_query_search() {
       --file) [[ $# -lt 2 ]] && { echo "error: --file requires an argument" >&2; return 1; }; file_filter="$2"; shift 2 ;;
       --case-sensitive) case_sensitive=true; shift ;;
       --limit) [[ $# -lt 2 ]] && { echo "error: --limit requires a number" >&2; return 1; }; limit="$2"; shift 2 ;;
-      --help) echo "Usage: gc-query search <keyword> [--type TYPE] [--session ID] [--file PATH] [--case-sensitive] [--limit N] [--format json|text]"; return 0 ;;
+      --offset) [[ $# -lt 2 ]] && { echo "error: --offset requires a number" >&2; return 1; }; offset="$2"; shift 2 ;;
+      --all-projects) all_projects=true; shift ;;
+      --help) echo "Usage: gc-query search <keyword> [--type TYPE] [--session ID] [--file PATH] [--case-sensitive] [--limit N] [--offset N] [--all-projects] [--format json|text]"; return 0 ;;
       -*) echo "error: unknown option '$1'" >&2; return 1 ;;
       *) if [[ -z "$keyword" ]]; then keyword="$1"; else echo "error: unexpected argument '$1'" >&2; return 1; fi; shift ;;
     esac
@@ -868,157 +873,65 @@ _gc_query_search() {
   local project_id
   project_id="$(_gc_current_project_id)"
 
-  # Escape keyword for jq's test() function
-  local escaped_keyword
-  escaped_keyword="$(printf '%s' "${keyword:-$file_filter}" | sed 's/[[\.*+?{}()|^$\\]/\\&/g')"
-
-  local jq_flags=""
-  if [[ "$case_sensitive" == "false" ]]; then
-    jq_flags="i"
+  # Fast path: FTS5 available + search.db exists
+  if _gc_has_fts5 && [[ -f "$GC_SEARCH_DB" ]]; then
+    _gc_search_fts5 "$keyword" "$format" "$type_filter" "$session_filter" "$project_id" "$limit" "$offset" "$all_projects"
+    return $?
   fi
 
-  local results_json="[]"
-  local total_matches=0
+  # Fallback path: grep-based search
+  _gc_search_grep_fallback "$keyword" "$format" "$type_filter" "$session_filter" "$file_filter" "$case_sensitive" "$project_id" "$limit" "$all_projects"
+}
 
-  # Determine which session dirs to scan
-  local scan_dirs=()
+# FTS5 fast path search
+_gc_search_fts5() {
+  local keyword="$1" format="$2" type_filter="$3" session_filter="$4"
+  local project_id="$5" limit="$6" offset="$7" all_projects="$8"
+
+  # Escape keyword for FTS5 MATCH (double-quote the term)
+  local fts_keyword
+  fts_keyword="${keyword//\"/\"\"}"
+
+  # Build WHERE clauses
+  local where_clauses=""
+  if [[ "$all_projects" != "true" ]]; then
+    local escaped_pid="${project_id//\'/\'\'}"
+    where_clauses="AND m.project_id = '$escaped_pid'"
+  fi
+  if [[ -n "$type_filter" ]]; then
+    local escaped_type="${type_filter//\'/\'\'}"
+    where_clauses="$where_clauses AND m.event_type = '$escaped_type'"
+  fi
   if [[ -n "$session_filter" ]]; then
     local resolved_sid
     resolved_sid="$(resolve_session_id "$project_id" "$session_filter" 2>/dev/null)" || {
       echo "error: session '$session_filter' not found" >&2
       return 3
     }
-    scan_dirs+=("$GC_EVENTS_DIR/$project_id/$resolved_sid")
-  else
-    if [[ -d "$GC_EVENTS_DIR/$project_id" ]]; then
-      for sdir in "$GC_EVENTS_DIR/$project_id"/*/; do
-        [[ -d "$sdir" ]] || continue
-        scan_dirs+=("$sdir")
-      done
-    fi
+    local escaped_sid="${resolved_sid//\'/\'\'}"
+    where_clauses="$where_clauses AND m.session_id = '$escaped_sid'"
   fi
 
-  for sdir in "${scan_dirs[@]+${scan_dirs[@]}}"; do
-    local sid_name
-    sid_name="$(basename "$sdir")"
+  local results
+  results="$(sqlite3 -json "$GC_SEARCH_DB" <<SQL 2>/dev/null
+SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet
+FROM events_fts f
+JOIN events_meta m ON f.rowid = m.rowid
+WHERE events_fts MATCH '"$fts_keyword"' $where_clauses
+ORDER BY rank
+LIMIT $limit OFFSET $offset;
+SQL
+  )" || results="[]"
 
-    # Get session timestamp for recency sorting
-    local session_ts=""
-    if [[ -f "$sdir/session.json" ]]; then
-      session_ts="$(jq -r '.started_at // ""' "$sdir/session.json" 2>/dev/null)" || true
-    fi
+  # sqlite3 -json returns nothing for 0 rows
+  if [[ -z "$results" || "$results" == "null" ]]; then
+    results="[]"
+  fi
 
-    for event_file in "$sdir"/[0-9]*.json; do
-      [[ -f "$event_file" ]] || continue
+  local count
+  count="$(printf '%s' "$results" | jq 'length' 2>/dev/null)" || count=0
 
-      local event_content
-      event_content="$(cat "$event_file" 2>/dev/null)" || continue
-      if ! printf '%s' "$event_content" | jq empty 2>/dev/null; then continue; fi
-
-      local etype
-      etype="$(printf '%s' "$event_content" | jq -r '.event_type // empty')"
-
-      # Apply type filter
-      if [[ -n "$type_filter" && "$etype" != "$type_filter" ]]; then continue; fi
-
-      local matched=false
-      local snippet=""
-      local match_count=0
-
-      if [[ -n "$file_filter" ]]; then
-        # Search for file paths in tool inputs/outputs
-        local file_matches
-        file_matches="$(printf '%s' "$event_content" | jq -r --arg f "$escaped_keyword" --arg flags "$jq_flags" '
-          [.. | strings] | map(select(test($f; $flags))) | length
-        ' 2>/dev/null)" || file_matches=0
-        if [[ "$file_matches" -gt 0 ]]; then
-          matched=true
-          match_count=$file_matches
-          snippet="$(printf '%s' "$event_content" | jq -r --arg f "$escaped_keyword" --arg flags "$jq_flags" '
-            [.. | strings] | map(select(test($f; $flags))) | first // empty
-          ' 2>/dev/null)"
-          snippet="${snippet:0:80}"
-        fi
-      else
-        # Build grep flags based on case sensitivity
-        local grep_flags="-qF"
-        local grep_count_flags="-cF"
-        if [[ "$case_sensitive" == "false" ]]; then
-          grep_flags="-qFi"
-          grep_count_flags="-cFi"
-        fi
-
-        # Search based on event type
-        case "$etype" in
-          UserPromptReceived)
-            local prompt_val
-            prompt_val="$(printf '%s' "$event_content" | jq -r '.data.prompt // empty')"
-            if [[ -n "$prompt_val" ]] && printf '%s' "$prompt_val" | grep $grep_flags -- "$keyword" 2>/dev/null; then
-              matched=true
-              match_count="$(printf '%s' "$prompt_val" | grep $grep_count_flags -- "$keyword" 2>/dev/null || echo 1)"
-              snippet="${prompt_val:0:80}"
-            fi
-            ;;
-          ToolCallCompleted)
-            local tool_name tool_result
-            tool_name="$(printf '%s' "$event_content" | jq -r '.data.tool_name // empty')"
-            tool_result="$(printf '%s' "$event_content" | jq -r '.data.tool_result // empty' | head -c 500)"
-            if printf '%s %s' "$tool_name" "$tool_result" | grep $grep_flags -- "$keyword" 2>/dev/null; then
-              matched=true
-              match_count="$(printf '%s %s' "$tool_name" "$tool_result" | grep $grep_count_flags -- "$keyword" 2>/dev/null || echo 1)"
-              snippet="${tool_name}: ${tool_result:0:60}"
-            fi
-            ;;
-          SessionStarted)
-            local cwd_val
-            cwd_val="$(printf '%s' "$event_content" | jq -r '.data.cwd // empty')"
-            if [[ -n "$cwd_val" ]] && printf '%s' "$cwd_val" | grep $grep_flags -- "$keyword" 2>/dev/null; then
-              matched=true
-              match_count=1
-              snippet="${cwd_val:0:80}"
-            fi
-            ;;
-          *)
-            # Search all string values using jq test()
-            local any_matches
-            any_matches="$(printf '%s' "$event_content" | jq -r --arg k "$escaped_keyword" --arg flags "$jq_flags" '
-              [.. | strings] | map(select(test($k; $flags))) | length
-            ' 2>/dev/null)" || any_matches=0
-            if [[ "$any_matches" -gt 0 ]]; then
-              matched=true
-              match_count=$any_matches
-              snippet="$(printf '%s' "$event_content" | jq -r --arg k "$escaped_keyword" --arg flags "$jq_flags" '
-                [.. | strings] | map(select(test($k; $flags))) | first // empty
-              ' 2>/dev/null)"
-              snippet="${snippet:0:80}"
-            fi
-            ;;
-        esac
-      fi
-
-      if [[ "$matched" == "true" ]]; then
-        total_matches=$((total_matches + 1))
-        local base seq_num
-        base="$(basename "$event_file" .json)"
-        seq_num=$((10#$base))
-
-        local event_ts
-        event_ts="$(printf '%s' "$event_content" | jq -r '.timestamp // ""' 2>/dev/null)" || event_ts=""
-        local sort_ts="${event_ts:-$session_ts}"
-
-        results_json="$(printf '%s' "$results_json" | jq \
-          --arg sid "$sid_name" \
-          --argjson seq "$seq_num" \
-          --arg type "$etype" \
-          --arg snippet "$snippet" \
-          --argjson match_count "$match_count" \
-          --arg timestamp "${sort_ts:-}" \
-          '. + [{"session_id": $sid, "sequence": $seq, "event_type": $type, "snippet": $snippet, "match_count": $match_count, "timestamp": $timestamp}]')"
-      fi
-    done
-  done
-
-  if [[ "$total_matches" -eq 0 ]]; then
+  if [[ "$count" -eq 0 ]]; then
     if [[ "$format" == "json" ]]; then
       echo "[]"
     else
@@ -1027,20 +940,264 @@ _gc_query_search() {
     return 0
   fi
 
-  # Sort by relevance (match_count desc) then recency (timestamp desc), then apply limit
-  # Use stable sort: first sort by timestamp desc, then by match_count desc
-  results_json="$(printf '%s' "$results_json" | jq --argjson lim "$limit" '
-    sort_by(.timestamp) | reverse
-    | sort_by(-.match_count)
-    | .[:$lim]
-  ')"
+  if [[ "$format" == "json" ]]; then
+    printf '%s' "$results" | jq '[.[] | {session_id, sequence, event_type, snippet, project_id, timestamp}]'
+  else
+    printf '%s' "$results" | jq -r '.[] | "\(.session_id)  seq:\(.sequence)  [\(.event_type)]  \(.snippet)"'
+  fi
+}
+
+# Grep-based fallback search (no FTS5)
+_gc_search_grep_fallback() {
+  local keyword="$1" format="$2" type_filter="$3" session_filter="$4"
+  local file_filter="$5" case_sensitive="$6" project_id="$7" limit="$8" all_projects="$9"
+
+  local search_term="${keyword:-$file_filter}"
+
+  # Build grep flags
+  local grep_flags="-rl"
+  if [[ "$case_sensitive" == "false" ]]; then
+    grep_flags="-rli"
+  fi
+
+  # Determine search directories
+  local search_base
+  if [[ "$all_projects" == "true" ]]; then
+    search_base="$GC_EVENTS_DIR"
+  else
+    search_base="$GC_EVENTS_DIR/$project_id"
+  fi
+
+  if [[ ! -d "$search_base" ]]; then
+    if [[ "$format" == "json" ]]; then echo "[]"; else echo "No results found."; fi
+    return 0
+  fi
+
+  # Pre-filter with grep -rl to find matching files fast
+  # Filter to only numbered event files (not session.json)
+  local matching_files
+  matching_files="$(grep $grep_flags -F --include='*.json' -- "$search_term" "$search_base" 2>/dev/null || true)"
+  if [[ -n "$matching_files" ]]; then
+    matching_files="$(printf '%s\n' "$matching_files" | grep -E '/[0-9][0-9]*[^/]*\.json$' || true)"
+  fi
+
+  if [[ -z "$matching_files" ]]; then
+    if [[ "$format" == "json" ]]; then echo "[]"; else echo "No results found."; fi
+    return 0
+  fi
+
+  # Apply session filter
+  if [[ -n "$session_filter" ]]; then
+    local resolved_sid
+    resolved_sid="$(resolve_session_id "$project_id" "$session_filter" 2>/dev/null)" || {
+      echo "error: session '$session_filter' not found" >&2
+      return 3
+    }
+    matching_files="$(printf '%s' "$matching_files" | grep "/$resolved_sid/" || true)"
+    if [[ -z "$matching_files" ]]; then
+      if [[ "$format" == "json" ]]; then echo "[]"; else echo "No results found."; fi
+      return 0
+    fi
+  fi
+
+  # Sort by mtime descending (newest first), limit early
+  local sorted_files
+  sorted_files="$(echo "$matching_files" | while IFS= read -r f; do
+    [[ -f "$f" ]] && stat -c '%Y %n' "$f" 2>/dev/null || true
+  done | sort -rn | awk -v lim="$((limit * 3))" 'NR<=lim {print $2}')"
+
+  local results_json="[]"
+  local result_count=0
+
+  while IFS= read -r event_file; do
+    [[ -f "$event_file" ]] || continue
+    [[ $result_count -ge $limit ]] && break
+
+    local event_content
+    event_content="$(cat "$event_file" 2>/dev/null)" || continue
+
+    local etype
+    etype="$(printf '%s' "$event_content" | jq -r '.event_type // empty' 2>/dev/null)" || continue
+
+    # Apply type filter
+    if [[ -n "$type_filter" && "$etype" != "$type_filter" ]]; then continue; fi
+
+    # Extract snippet
+    local snippet=""
+    case "$etype" in
+      UserPromptReceived)
+        snippet="$(printf '%s' "$event_content" | jq -r '.data.prompt // .data.message // "" | .[:80]' 2>/dev/null)" ;;
+      ToolCallCompleted)
+        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_result // "" | tostring | .[:60])' 2>/dev/null)" ;;
+      ToolCallRequested)
+        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_input // "" | tostring | .[:60])' 2>/dev/null)" ;;
+      SessionStarted)
+        snippet="$(printf '%s' "$event_content" | jq -r '.data.cwd // "" | .[:80]' 2>/dev/null)" ;;
+      *)
+        snippet="$(printf '%s' "$event_content" | jq -r '[.data | .. | strings] | first // "" | .[:80]' 2>/dev/null)" ;;
+    esac
+
+    # Extract metadata from file path
+    local sid_name seq_num event_ts
+    local dir_path
+    dir_path="$(dirname "$event_file")"
+    sid_name="$(basename "$dir_path")"
+    local base
+    base="$(basename "$event_file" .json)"
+    # Strip random suffix if present (e.g., 000001_a3f7 -> 000001)
+    base="${base%%_*}"
+    seq_num=$((10#$base)) 2>/dev/null || seq_num=0
+    event_ts="$(printf '%s' "$event_content" | jq -r '.timestamp // ""' 2>/dev/null)" || event_ts=""
+
+    results_json="$(printf '%s' "$results_json" | jq \
+      --arg sid "$sid_name" \
+      --argjson seq "$seq_num" \
+      --arg type "$etype" \
+      --arg snippet "$snippet" \
+      --arg timestamp "$event_ts" \
+      '. + [{"session_id": $sid, "sequence": $seq, "event_type": $type, "snippet": $snippet, "timestamp": $timestamp}]')"
+    result_count=$((result_count + 1))
+  done <<< "$sorted_files"
+
+  if [[ "$result_count" -eq 0 ]]; then
+    if [[ "$format" == "json" ]]; then echo "[]"; else echo "No results found."; fi
+    return 0
+  fi
 
   if [[ "$format" == "json" ]]; then
-    # Remove internal sorting fields from output
-    printf '%s' "$results_json" | jq '[.[] | del(.match_count, .timestamp)]'
+    printf '%s' "$results_json" | jq '.'
   else
     printf '%s' "$results_json" | jq -r '.[] | "\(.session_id)  seq:\(.sequence)  [\(.event_type)]  \(.snippet)"'
   fi
+}
+
+# ---------------------------------------------------------------------------
+# reindex subcommand -- rebuild FTS5 search index from all events
+# ---------------------------------------------------------------------------
+_gc_query_reindex() {
+  local project_filter="" verbose=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) [[ $# -lt 2 ]] && { echo "error: --project requires an argument" >&2; return 1; }; project_filter="$2"; shift 2 ;;
+      --verbose) verbose=true; shift ;;
+      --help) echo "Usage: gc-query reindex [--project ID] [--verbose]"; return 0 ;;
+      -*) echo "error: unknown option '$1'" >&2; return 1 ;;
+      *) echo "error: unexpected argument '$1'" >&2; return 1 ;;
+    esac
+  done
+
+  if ! _gc_has_fts5; then
+    echo "error: sqlite3 with FTS5 is required for reindex" >&2
+    return 1
+  fi
+
+  echo "Rebuilding search index..."
+
+  # Drop and recreate
+  rm -f "$GC_SEARCH_DB"
+  _gc_init_search_db
+
+  local total_events=0 total_errors=0 total_projects=0
+
+  # Determine which project dirs to scan
+  local project_dirs=()
+  if [[ -n "$project_filter" ]]; then
+    if [[ -d "$GC_EVENTS_DIR/$project_filter" ]]; then
+      project_dirs+=("$GC_EVENTS_DIR/$project_filter")
+    else
+      echo "error: project '$project_filter' not found" >&2
+      return 1
+    fi
+  else
+    for pdir in "$GC_EVENTS_DIR"/*/; do
+      [[ -d "$pdir" ]] || continue
+      project_dirs+=("$pdir")
+    done
+  fi
+
+  for pdir in "${project_dirs[@]+${project_dirs[@]}}"; do
+    local pid
+    pid="$(basename "$pdir")"
+    total_projects=$((total_projects + 1))
+    [[ "$verbose" == "true" ]] && echo "  Project: $pid"
+
+    for sdir in "$pdir"/*/; do
+      [[ -d "$sdir" ]] || continue
+      local sid
+      sid="$(basename "$sdir")"
+
+      # Batch collect events for this session
+      local batch_sql="BEGIN TRANSACTION;"
+      local batch_count=0
+
+      for event_file in "$sdir"/[0-9]*.json; do
+        [[ -f "$event_file" ]] || continue
+
+        local base seq_num
+        base="$(basename "$event_file" .json)"
+        base="${base%%_*}"
+        seq_num=$((10#$base)) 2>/dev/null || { total_errors=$((total_errors + 1)); continue; }
+
+        local event_content
+        event_content="$(cat "$event_file" 2>/dev/null)" || { total_errors=$((total_errors + 1)); continue; }
+
+        local etype timestamp
+        etype="$(printf '%s' "$event_content" | jq -r '.event_type // ""' 2>/dev/null)" || { total_errors=$((total_errors + 1)); continue; }
+        timestamp="$(printf '%s' "$event_content" | jq -r '.timestamp // ""' 2>/dev/null)" || timestamp=""
+
+        local content
+        content="$(_gc_extract_searchable_content "$etype" "$event_content")" || { total_errors=$((total_errors + 1)); continue; }
+        [[ -z "$content" ]] && continue
+
+        local snippet="${content:0:200}"
+
+        # Escape for SQL
+        local e_pid="${pid//\'/\'\'}" e_sid="${sid//\'/\'\'}" e_etype="${etype//\'/\'\'}"
+        local e_ts="${timestamp//\'/\'\'}" e_snippet="${snippet//\'/\'\'}" e_content="${content//\'/\'\'}"
+
+        batch_sql="$batch_sql
+INSERT OR IGNORE INTO events_meta (project_id, session_id, sequence, event_type, timestamp, snippet) VALUES ('$e_pid', '$e_sid', $seq_num, '$e_etype', '$e_ts', '$e_snippet');
+INSERT INTO events_fts (rowid, content) SELECT rowid, '$e_content' FROM events_meta WHERE project_id = '$e_pid' AND session_id = '$e_sid' AND sequence = $seq_num;"
+
+        batch_count=$((batch_count + 1))
+        total_events=$((total_events + 1))
+
+        # Commit every 1000 events
+        if [[ $((batch_count % 1000)) -eq 0 ]]; then
+          batch_sql="$batch_sql
+COMMIT;
+BEGIN TRANSACTION;"
+          [[ "$verbose" == "true" ]] && echo "    $sid: $batch_count events indexed..."
+        fi
+      done
+
+      batch_sql="$batch_sql
+COMMIT;"
+
+      if [[ $batch_count -gt 0 ]]; then
+        if ! sqlite3 "$GC_SEARCH_DB" <<< "$batch_sql" 2>/dev/null; then
+          total_errors=$((total_errors + batch_count))
+          total_events=$((total_events - batch_count))
+        fi
+      fi
+    done
+  done
+
+  # Report
+  local db_size="0"
+  if [[ -f "$GC_SEARCH_DB" ]]; then
+    db_size="$(_gc_format_size "$(stat -c %s "$GC_SEARCH_DB" 2>/dev/null || echo 0)")"
+  fi
+
+  echo ""
+  echo "Reindex complete:"
+  echo "  Projects scanned: $total_projects"
+  echo "  Events indexed:   $total_events"
+  if [[ $total_errors -gt 0 ]]; then
+    echo "  Errors:           $total_errors"
+  fi
+  echo "  Database size:    $db_size"
 }
 
 # ---------------------------------------------------------------------------
@@ -1710,6 +1867,7 @@ main() {
     session)    _gc_query_session "$@" ;;
     sessions)   _gc_query_sessions "$@" ;;
     search)     _gc_query_search "$@" ;;
+    reindex)    _gc_query_reindex "$@" ;;
     replay)     _gc_query_replay "$@" ;;
     watch)      _gc_query_watch "$@" ;;
     doctor)     _gc_query_doctor "$@" ;;
