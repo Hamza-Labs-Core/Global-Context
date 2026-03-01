@@ -150,12 +150,12 @@ gc_check_prerequisites() {
       PREREQ_MESSAGE[sqlite3]="sqlite3 $sqlite_ver (FTS5)"
     else
       PREREQ_STATUS[sqlite3]="optional_missing"
-      PREREQ_MESSAGE[sqlite3]="WARN: sqlite3 found but FTS5 extension not available. Search will use grep fallback."
+      PREREQ_MESSAGE[sqlite3]="WARN: sqlite3 $sqlite_ver found but FTS5 not enabled. On macOS: brew install sqlite3. On Linux: build from source with --enable-fts5 (see sqlite.org/fts5.html). Search will use grep fallback."
     fi
   else
     PREREQ_STATUS[sqlite3]="optional_missing"
     PREREQ_VERSION[sqlite3]=""
-    PREREQ_MESSAGE[sqlite3]="INFO: sqlite3 not found. Search will use grep fallback (slower)."
+    PREREQ_MESSAGE[sqlite3]="INFO: sqlite3 not found. On macOS: brew install sqlite3. On Debian/Ubuntu: sudo apt install sqlite3. Search will use grep fallback (slower)."
   fi
 
   if [[ "$all_required_ok" == "true" ]]; then
@@ -171,6 +171,7 @@ gc_check_prerequisites() {
 # ---------------------------------------------------------------------------
 gc_print_prereq_report() {
   local names=("bash" "jq" "node" "sha256sum" "flock" "git" "uuidgen" "sqlite3")
+  local hints=()
   for name in "${names[@]}"; do
     local status="${PREREQ_STATUS[$name]:-unknown}"
     local message="${PREREQ_MESSAGE[$name]:-}"
@@ -189,12 +190,19 @@ gc_print_prereq_report() {
         ;;
       optional_missing)
         printf "  %-20s %s\n" "$name" "not found (optional)"
+        [[ -n "$message" ]] && hints+=("$message")
         ;;
       *)
         printf "  %-20s %s\n" "$name" "unknown"
         ;;
     esac
   done
+  if [[ ${#hints[@]} -gt 0 ]]; then
+    echo ""
+    for hint in "${hints[@]}"; do
+      echo "  $hint"
+    done
+  fi
 }
 
 # ---------------------------------------------------------------------------
