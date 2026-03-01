@@ -83,6 +83,134 @@ gc_print_prereq_report
 echo ""
 
 # ---------------------------------------------------------------------------
+# Step 1b: Auto-install sqlite3 with FTS5 if missing
+# ---------------------------------------------------------------------------
+_gc_install_sqlite3() {
+  # Already have working FTS5? Skip.
+  if command -v sqlite3 &>/dev/null && \
+     sqlite3 ':memory:' "CREATE VIRTUAL TABLE _t USING fts5(c);" 2>/dev/null; then
+    return 0
+  fi
+
+  # Need curl or wget
+  local downloader=""
+  if command -v curl &>/dev/null; then
+    downloader="curl"
+  elif command -v wget &>/dev/null; then
+    downloader="wget"
+  else
+    echo "  sqlite3 (FTS5)          skipped (no curl/wget to download)"
+    return 1
+  fi
+
+  # Need unzip
+  if ! command -v unzip &>/dev/null; then
+    echo "  sqlite3 (FTS5)          skipped (unzip not found)"
+    return 1
+  fi
+
+  # Detect platform
+  local platform=""
+  local os_name
+  os_name="$(uname -s)"
+  local arch
+  arch="$(uname -m)"
+  case "$os_name" in
+    Linux)
+      if [[ "$arch" == "x86_64" ]]; then
+        platform="linux-x64"
+      else
+        echo "  sqlite3 (FTS5)          skipped (unsupported arch: $arch)"
+        return 1
+      fi
+      ;;
+    Darwin)
+      platform="osx-x64"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      if [[ "$arch" == "x86_64" ]] || [[ "$arch" == "AMD64" ]]; then
+        platform="win-x64"
+      else
+        platform="win32-x86"
+      fi
+      ;;
+    *)
+      echo "  sqlite3 (FTS5)          skipped (unsupported OS: $os_name)"
+      return 1
+      ;;
+  esac
+
+  # Scrape sqlite.org/download.html for the zip filename
+  local page_content=""
+  if [[ "$downloader" == "curl" ]]; then
+    page_content="$(curl -sL https://sqlite.org/download.html 2>/dev/null)" || true
+  else
+    page_content="$(wget -qO- https://sqlite.org/download.html 2>/dev/null)" || true
+  fi
+
+  if [[ -z "$page_content" ]]; then
+    echo "  sqlite3 (FTS5)          skipped (cannot reach sqlite.org)"
+    return 1
+  fi
+
+  # Extract filename like: 2026/sqlite-tools-linux-x64-3510200.zip
+  local zip_path
+  zip_path="$(printf '%s' "$page_content" | grep -oP "[0-9]{4}/sqlite-tools-${platform}-[0-9]+\\.zip" | head -1)" || true
+
+  if [[ -z "$zip_path" ]]; then
+    echo "  sqlite3 (FTS5)          skipped (cannot find download for $platform)"
+    return 1
+  fi
+
+  local zip_url="https://sqlite.org/$zip_path"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  echo "  sqlite3 (FTS5)          downloading from sqlite.org..."
+  if [[ "$downloader" == "curl" ]]; then
+    curl -sL "$zip_url" -o "$tmp_dir/sqlite-tools.zip" 2>/dev/null || { rm -rf "$tmp_dir"; echo "  sqlite3 (FTS5)          download failed"; return 1; }
+  else
+    wget -q "$zip_url" -O "$tmp_dir/sqlite-tools.zip" 2>/dev/null || { rm -rf "$tmp_dir"; echo "  sqlite3 (FTS5)          download failed"; return 1; }
+  fi
+
+  unzip -qo "$tmp_dir/sqlite-tools.zip" -d "$tmp_dir" 2>/dev/null || { rm -rf "$tmp_dir"; echo "  sqlite3 (FTS5)          unzip failed"; return 1; }
+
+  # Find the sqlite3 binary in the extracted dir
+  local sqlite3_bin
+  sqlite3_bin="$(find "$tmp_dir" -name 'sqlite3' -o -name 'sqlite3.exe' 2>/dev/null | head -1)"
+
+  if [[ -z "$sqlite3_bin" || ! -f "$sqlite3_bin" ]]; then
+    rm -rf "$tmp_dir"
+    echo "  sqlite3 (FTS5)          skipped (binary not found in archive)"
+    return 1
+  fi
+
+  # Install to GC bin dir
+  mkdir -p "$GC_BASE/bin"
+  cp "$sqlite3_bin" "$GC_BASE/bin/sqlite3"
+  chmod 755 "$GC_BASE/bin/sqlite3"
+  rm -rf "$tmp_dir"
+
+  # Verify FTS5 works
+  if "$GC_BASE/bin/sqlite3" ':memory:' "CREATE VIRTUAL TABLE _t USING fts5(c);" 2>/dev/null; then
+    echo "  sqlite3 (FTS5)          ok (installed to $GC_BASE/bin/sqlite3)"
+    # Update PATH for the rest of this install session
+    export PATH="$GC_BASE/bin:$PATH"
+    return 0
+  else
+    rm -f "$GC_BASE/bin/sqlite3"
+    echo "  sqlite3 (FTS5)          skipped (downloaded binary lacks FTS5)"
+    return 1
+  fi
+}
+
+if [[ "$OPT_DRY_RUN" != "true" ]]; then
+  if [[ "${PREREQ_STATUS[sqlite3]:-}" != "ok" ]]; then
+    _gc_install_sqlite3 || true
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Step 2: Version check (upgrade logic)
 # ---------------------------------------------------------------------------
 INSTALLED_VERSION="$(gc_get_installed_version "$GC_BASE")"
@@ -152,6 +280,17 @@ else
   gc_config_create
   chmod 600 "$GC_CONFIG_FILE"
   echo "  config.json             ok (created)"
+fi
+
+# Create search.db if sqlite3+FTS5 is available
+source "$LIB_DIR/search_index.sh"
+if _gc_has_fts5; then
+  if [[ -f "$GC_SEARCH_DB" ]]; then
+    echo "  search.db               ok (preserved existing)"
+  else
+    _gc_init_search_db
+    echo "  search.db               ok (created)"
+  fi
 fi
 echo ""
 

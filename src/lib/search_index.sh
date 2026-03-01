@@ -38,7 +38,7 @@ _gc_init_search_db() {
   if [[ -f "$db" ]]; then
     return 0
   fi
-  sqlite3 "$db" <<'SQL'
+  sqlite3 "$db" <<'SQL' >/dev/null
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS events_meta (
   rowid INTEGER PRIMARY KEY AUTOINCREMENT,
