@@ -3258,8 +3258,7 @@ function renderSearchResults(results, query) {
   el.innerHTML = results.map(r => {
     const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
     const projectBadge = r.project_id ? '<span class="search-result-project">' + escHtmlInline(r.project_id) + '</span>' : '';
-    return '<div class="search-result-item" onclick="navigateToSearchResult(\'' +
-      escHtmlInline(r.project_id || '') + '\',\'' + escHtmlInline(r.session_id) + '\')">' +
+    return '<div class="search-result-item" data-project="' + escHtmlInline(r.project_id || '') + '" data-session="' + escHtmlInline(r.session_id || '') + '">' +
       '<div class="search-result-header">' +
         '<span class="search-result-type">' + escHtmlInline(r.event_type || '') + '</span>' +
         '<span class="search-result-session">' + escHtmlInline(r.session_id ? r.session_id.slice(0, 12) : '') + '</span>' +
@@ -3269,6 +3268,13 @@ function renderSearchResults(results, query) {
       '<div class="search-result-snippet">' + escHtmlInline(r.snippet || '') + '</div>' +
     '</div>';
   }).join('');
+
+  // Attach click handlers via delegation
+  el.querySelectorAll('.search-result-item').forEach(item => {
+    item.addEventListener('click', () => {
+      navigateToSearchResult(item.dataset.project, item.dataset.session);
+    });
+  });
 }
 
 function escHtmlInline(s) {
