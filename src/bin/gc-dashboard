@@ -1063,6 +1063,37 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, results);
     }
 
+    // --- Search index status ---
+    if (pathname === '/api/search/status') {
+      try {
+        const { execSync } = await import('node:child_process');
+        const basePath = getBasePath();
+        const searchDb = path.join(basePath, 'search.db');
+        const eventsDir = path.join(basePath, 'events');
+
+        // Count total event files
+        let total = 0;
+        try {
+          const raw = execSync(`find '${eventsDir}' -name '[0-9]*.json' 2>/dev/null | wc -l`, { encoding: 'utf-8', timeout: 5000 });
+          total = parseInt(raw.trim()) || 0;
+        } catch { total = 0; }
+
+        // Count indexed events
+        let indexed = 0;
+        try {
+          const fs = await import('node:fs');
+          fs.accessSync(searchDb);
+          const raw = execSync(`sqlite3 '${searchDb.replace(/'/g, "'\\''")}' "SELECT COUNT(*) FROM events_meta;"`, { encoding: 'utf-8', timeout: 5000 });
+          indexed = parseInt(raw.trim()) || 0;
+        } catch { indexed = 0; }
+
+        const pct = total > 0 ? Math.round((indexed / total) * 100) : 0;
+        return sendJson(res, { indexed, total, percentage: pct, fts5: indexed > 0 });
+      } catch (e) {
+        return sendJson(res, { indexed: 0, total: 0, percentage: 0, fts5: false });
+      }
+    }
+
     // --- Search API ---
     if (pathname === '/api/search') {
       const q = url.searchParams.get('q') || '';
@@ -2392,6 +2423,35 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     color: var(--text2);
     margin-left: 4px;
   }
+
+  .search-index-status {
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text2);
+    background: var(--bg2);
+    border: 1px solid var(--border);
+  }
+  .search-index-status .status-bar {
+    height: 4px;
+    background: var(--bg3);
+    border-radius: 2px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+  .search-index-status .status-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+  .search-index-status.indexing {
+    border-color: var(--yellow, #e5c07b);
+  }
+  .search-index-status.ready {
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -2450,6 +2510,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           </select>
         </div>
       </div>
+      <div class="search-index-status" id="searchIndexStatus" style="display:none"></div>
       <div class="search-results" id="searchResults">
         <div class="search-empty">Enter a keyword to search across all sessions</div>
       </div>
@@ -2741,6 +2802,7 @@ function switchView(view) {
     sidebarEl.style.display = 'none';
     layout.classList.add('full-width');
     populateSearchFilters();
+    loadSearchIndexStatus();
     $('searchInput').focus();
   } else {
     eventsEls.forEach(el => el.style.display = '');
@@ -3225,6 +3287,35 @@ async function populateSearchFilters() {
     });
     searchProjectsLoaded = true;
   } catch {}
+}
+
+let searchStatusTimer = null;
+async function loadSearchIndexStatus() {
+  const el = $('searchIndexStatus');
+  if (!el) return;
+  try {
+    const s = await api('/api/search/status');
+    if (!s || s.total === 0) {
+      el.style.display = 'none';
+      return;
+    }
+    if (s.percentage >= 100) {
+      el.className = 'search-index-status ready';
+      el.style.display = 'none';
+      if (searchStatusTimer) { clearInterval(searchStatusTimer); searchStatusTimer = null; }
+      return;
+    }
+    el.style.display = '';
+    el.className = 'search-index-status indexing';
+    el.innerHTML = 'Search index: ' + s.indexed.toLocaleString() + ' / ' + s.total.toLocaleString() + ' events (' + s.percentage + '%) &mdash; results may be incomplete' +
+      '<div class="status-bar"><div class="status-bar-fill" style="width:' + s.percentage + '%"></div></div>';
+    // Auto-refresh status every 5s while indexing
+    if (!searchStatusTimer) {
+      searchStatusTimer = setInterval(loadSearchIndexStatus, 5000);
+    }
+  } catch {
+    el.style.display = 'none';
+  }
 }
 
 async function doSearch() {
