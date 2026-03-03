@@ -1120,7 +1120,7 @@ const server = http.createServer(async (req, res) => {
           if (project) where += ` AND m.project_id = '${project.replace(/'/g, "''")}'`;
           if (type) where += ` AND m.event_type = '${type.replace(/'/g, "''")}'`;
 
-          const sql = `SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet FROM events_fts f JOIN events_meta m ON f.rowid = m.rowid WHERE events_fts MATCH '"${escapedQ}"' ${where} ORDER BY rank LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)};`;
+          const sql = `SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet, f.content FROM events_fts f JOIN events_meta m ON f.rowid = m.rowid WHERE events_fts MATCH '"${escapedQ}"' ${where} ORDER BY rank LIMIT ${parseInt(limit)} OFFSET ${parseInt(offset)};`;
           const raw = execSync(`sqlite3 -json '${searchDb.replace(/'/g, "'\\''")}' "${sql.replace(/"/g, '\\"')}"`, { timeout: 10000, encoding: 'utf-8' });
           results = raw.trim() ? JSON.parse(raw) : [];
         } catch {
@@ -2452,6 +2452,42 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .search-index-status.ready {
     display: none;
   }
+  .search-result-count {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 10px;
+  }
+  .search-result-content {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+    background: var(--bg2);
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin: 6px 0;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: monospace;
+  }
+  .search-result-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .search-result-actions button {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .search-result-actions button:hover {
+    background: var(--bg3);
+  }
 </style>
 </head>
 <body>
@@ -3346,9 +3382,13 @@ function renderSearchResults(results, query) {
     return;
   }
 
-  el.innerHTML = results.map(r => {
+  el.innerHTML = '<div class="search-result-count">' + results.length + ' result' + (results.length !== 1 ? 's' : '') + '</div>' +
+    results.map((r, i) => {
     const time = r.timestamp ? new Date(r.timestamp).toLocaleString() : '';
     const projectBadge = r.project_id ? '<span class="search-result-project">' + escHtmlInline(r.project_id) + '</span>' : '';
+    const fullContent = r.content || r.snippet || '';
+    const isLong = fullContent.length > 200;
+    const preview = isLong ? fullContent.slice(0, 200) + '...' : fullContent;
     return '<div class="search-result-item" data-project="' + escHtmlInline(r.project_id || '') + '" data-session="' + escHtmlInline(r.session_id || '') + '">' +
       '<div class="search-result-header">' +
         '<span class="search-result-type">' + escHtmlInline(r.event_type || '') + '</span>' +
@@ -3356,14 +3396,33 @@ function renderSearchResults(results, query) {
         projectBadge +
         '<span class="search-result-time">' + escHtmlInline(time) + '</span>' +
       '</div>' +
-      '<div class="search-result-snippet">' + escHtmlInline(r.snippet || '') + '</div>' +
+      '<pre class="search-result-content" id="src-' + i + '">' + escHtmlInline(preview) + '</pre>' +
+      (isLong ? '<div class="search-result-actions"><button class="expand-content-btn" data-idx="' + i + '" data-full="' + escHtmlInline(fullContent) + '" data-preview="' + escHtmlInline(preview) + '">Show full content</button><button class="goto-session-btn" data-project="' + escHtmlInline(r.project_id || '') + '" data-session="' + escHtmlInline(r.session_id || '') + '">Go to session</button></div>'
+            : '<div class="search-result-actions"><button class="goto-session-btn" data-project="' + escHtmlInline(r.project_id || '') + '" data-session="' + escHtmlInline(r.session_id || '') + '">Go to session</button></div>') +
     '</div>';
   }).join('');
 
-  // Attach click handlers via delegation
-  el.querySelectorAll('.search-result-item').forEach(item => {
-    item.addEventListener('click', () => {
-      navigateToSearchResult(item.dataset.project, item.dataset.session);
+  // Expand/collapse content
+  el.querySelectorAll('.expand-content-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = btn.dataset.idx;
+      const pre = $('src-' + idx);
+      if (btn.textContent === 'Show full content') {
+        pre.textContent = btn.dataset.full;
+        btn.textContent = 'Collapse';
+      } else {
+        pre.textContent = btn.dataset.preview;
+        btn.textContent = 'Show full content';
+      }
+    });
+  });
+
+  // Go to session buttons
+  el.querySelectorAll('.goto-session-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigateToSearchResult(btn.dataset.project, btn.dataset.session);
     });
   });
 }
