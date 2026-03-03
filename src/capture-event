@@ -326,10 +326,8 @@ _gc_index_event_inline() {
   sqlite3 "$GC_SEARCH_DB" <<SQL 2>/dev/null || true
 INSERT OR IGNORE INTO events_meta (project_id, session_id, sequence, event_type, timestamp, snippet)
 VALUES ('$p_id', '$s_id', $seq, '$etype', '$ts', '$snippet');
-INSERT INTO events_fts (rowid, content)
-SELECT rowid, '$content'
-FROM events_meta
-WHERE project_id = '$p_id' AND session_id = '$s_id' AND sequence = $seq;
+INSERT OR IGNORE INTO events_fts (rowid, content)
+VALUES ((SELECT rowid FROM events_meta WHERE project_id = '$p_id' AND session_id = '$s_id' AND sequence = $seq), '$content');
 SQL
 }
 

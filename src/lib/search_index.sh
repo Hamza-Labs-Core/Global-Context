@@ -50,11 +50,7 @@ CREATE TABLE IF NOT EXISTS events_meta (
   snippet TEXT NOT NULL DEFAULT '',
   UNIQUE(project_id, session_id, sequence)
 );
-CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-  content,
-  content='events_meta',
-  content_rowid='rowid'
-);
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(content);
 SQL
   chmod 600 "$db"
 }
@@ -72,13 +68,13 @@ _gc_extract_searchable_content() {
       ;;
     ToolCallCompleted)
       printf '%s' "$envelope_json" | jq -r '
-        [.data.tool_name // "", (.data.tool_result // "" | tostring | .[:500])]
+        [.data.tool_name // "", (.data.tool_result // "" | tostring | .[:4000])]
         | join(" ")
       ' 2>/dev/null
       ;;
     ToolCallRequested)
       printf '%s' "$envelope_json" | jq -r '
-        [.data.tool_name // "", (.data.tool_input // "" | tostring | .[:500])]
+        [.data.tool_name // "", (.data.tool_input // "" | tostring | .[:4000])]
         | join(" ")
       ' 2>/dev/null
       ;;
@@ -137,9 +133,7 @@ _gc_index_event() {
   sqlite3 "$db" <<SQL 2>/dev/null || true
 INSERT OR IGNORE INTO events_meta (project_id, session_id, sequence, event_type, timestamp, snippet)
 VALUES ('$project_id', '$session_id', $sequence, '$event_type', '$timestamp', '$snippet');
-INSERT INTO events_fts (rowid, content)
-SELECT rowid, '$content'
-FROM events_meta
-WHERE project_id = '$project_id' AND session_id = '$session_id' AND sequence = $sequence;
+INSERT OR IGNORE INTO events_fts (rowid, content)
+VALUES ((SELECT rowid FROM events_meta WHERE project_id = '$project_id' AND session_id = '$session_id' AND sequence = $sequence), '$content');
 SQL
 }

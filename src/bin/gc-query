@@ -914,7 +914,7 @@ _gc_search_fts5() {
 
   local results
   results="$(sqlite3 -json "$GC_SEARCH_DB" <<SQL 2>/dev/null
-SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet
+SELECT m.project_id, m.session_id, m.sequence, m.event_type, m.timestamp, m.snippet, f.content
 FROM events_fts f
 JOIN events_meta m ON f.rowid = m.rowid
 WHERE events_fts MATCH '"$fts_keyword"' $where_clauses
@@ -941,9 +941,9 @@ SQL
   fi
 
   if [[ "$format" == "json" ]]; then
-    printf '%s' "$results" | jq '[.[] | {session_id, sequence, event_type, snippet, project_id, timestamp}]'
+    printf '%s' "$results" | jq '[.[] | {session_id, sequence, event_type, snippet, content, project_id, timestamp}]'
   else
-    printf '%s' "$results" | jq -r '.[] | "\(.session_id)  seq:\(.sequence)  [\(.event_type)]  \(.snippet)"'
+    printf '%s' "$results" | jq -r '.[] | "--- [\(.event_type)] \(.project_id)/\(.session_id) seq:\(.sequence) \(.timestamp)\n\(.content // .snippet)\n"'
   fi
 }
 
@@ -1022,19 +1022,19 @@ _gc_search_grep_fallback() {
     # Apply type filter
     if [[ -n "$type_filter" && "$etype" != "$type_filter" ]]; then continue; fi
 
-    # Extract snippet
+    # Extract content for display
     local snippet=""
     case "$etype" in
       UserPromptReceived)
-        snippet="$(printf '%s' "$event_content" | jq -r '.data.prompt // .data.message // "" | .[:80]' 2>/dev/null)" ;;
+        snippet="$(printf '%s' "$event_content" | jq -r '.data.prompt // .data.message // "" | .[:2000]' 2>/dev/null)" ;;
       ToolCallCompleted)
-        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_result // "" | tostring | .[:60])' 2>/dev/null)" ;;
+        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_result // "" | tostring | .[:2000])' 2>/dev/null)" ;;
       ToolCallRequested)
-        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_input // "" | tostring | .[:60])' 2>/dev/null)" ;;
+        snippet="$(printf '%s' "$event_content" | jq -r '(.data.tool_name // "") + ": " + (.data.tool_input // "" | tostring | .[:2000])' 2>/dev/null)" ;;
       SessionStarted)
-        snippet="$(printf '%s' "$event_content" | jq -r '.data.cwd // "" | .[:80]' 2>/dev/null)" ;;
+        snippet="$(printf '%s' "$event_content" | jq -r '.data.cwd // ""' 2>/dev/null)" ;;
       *)
-        snippet="$(printf '%s' "$event_content" | jq -r '[.data | .. | strings] | first // "" | .[:80]' 2>/dev/null)" ;;
+        snippet="$(printf '%s' "$event_content" | jq -r '[.data | .. | strings] | first // "" | .[:2000]' 2>/dev/null)" ;;
     esac
 
     # Extract metadata from file path
@@ -1067,7 +1067,7 @@ _gc_search_grep_fallback() {
   if [[ "$format" == "json" ]]; then
     printf '%s' "$results_json" | jq '.'
   else
-    printf '%s' "$results_json" | jq -r '.[] | "\(.session_id)  seq:\(.sequence)  [\(.event_type)]  \(.snippet)"'
+    printf '%s' "$results_json" | jq -r '.[] | "--- [\(.event_type)] \(.session_id) seq:\(.sequence) \(.timestamp)\n\(.snippet)\n"'
   fi
 }
 
@@ -1158,7 +1158,7 @@ _gc_query_reindex() {
 
         batch_sql="$batch_sql
 INSERT OR IGNORE INTO events_meta (project_id, session_id, sequence, event_type, timestamp, snippet) VALUES ('$e_pid', '$e_sid', $seq_num, '$e_etype', '$e_ts', '$e_snippet');
-INSERT INTO events_fts (rowid, content) SELECT rowid, '$e_content' FROM events_meta WHERE project_id = '$e_pid' AND session_id = '$e_sid' AND sequence = $seq_num;"
+INSERT OR IGNORE INTO events_fts (rowid, content) VALUES ((SELECT rowid FROM events_meta WHERE project_id = '$e_pid' AND session_id = '$e_sid' AND sequence = $seq_num), '$e_content');"
 
         batch_count=$((batch_count + 1))
         total_events=$((total_events + 1))
