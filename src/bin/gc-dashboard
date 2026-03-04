@@ -1179,8 +1179,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // --- Dashboard HTML ---
-    if (pathname === '/' || pathname === '/index.html') {
+    // --- Dashboard HTML (serve for all view paths) ---
+    if (pathname === '/' || pathname === '/index.html' || pathname === '/usage' || pathname === '/search' || pathname.startsWith('/events/')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(DASHBOARD_HTML);
       return;
@@ -2708,6 +2708,8 @@ function appendEvent(event) {
 }
 
 // --- Actions ---
+let navigating = false; // true during popstate/init to suppress pushState
+
 async function loadProjects() {
   state.projects = await api('/api/projects');
   renderProjects();
@@ -2722,11 +2724,15 @@ async function selectProject(projectId) {
   renderEvents();
   renderSessionHeader();
 
+  if (!navigating) {
+    history.pushState(null, '', '/events/' + encodeURIComponent(projectId) + '/');
+  }
+
   state.sessions = await api('/api/sessions?project=' + encodeURIComponent(projectId));
   renderSessions();
 
-  // Auto-select the latest session
-  if (state.sessions.length > 0) {
+  // Auto-select the latest session (only when not navigating to a specific session)
+  if (!navigating && state.sessions.length > 0) {
     selectSession(state.sessions[0].session_id);
   }
 }
@@ -2735,6 +2741,10 @@ async function selectSession(sessionId) {
   state.selectedSession = sessionId;
   stopStream();
   renderSessions();
+
+  if (!navigating) {
+    history.pushState(null, '', '/events/' + encodeURIComponent(state.selectedProject) + '/' + encodeURIComponent(sessionId) + '/');
+  }
 
   // Load existing events
   state.events = await api('/api/events?project=' + encodeURIComponent(state.selectedProject) + '&session=' + encodeURIComponent(sessionId));
@@ -2818,6 +2828,12 @@ function switchView(view) {
   const searchEl = $('searchView');
   const sidebarEl = $('sidebar');
   const layout = document.querySelector('.layout');
+
+  if (!navigating) {
+    if (view === 'usage') history.pushState(null, '', '/usage');
+    else if (view === 'search') history.pushState(null, '', '/search');
+    else if (view === 'events' && !state.selectedProject) history.pushState(null, '', '/');
+  }
 
   $('tabEvents').className = 'header-tab' + (view === 'events' ? ' active' : '');
   $('tabUsage').className = 'header-tab' + (view === 'usage' ? ' active' : '');
@@ -3452,8 +3468,39 @@ document.addEventListener('DOMContentLoaded', () => {
   if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 });
 
+// --- URL Routing ---
+async function routeFromUrl() {
+  const p = decodeURIComponent(location.pathname).replace(/\/+$/, '');
+
+  await loadProjects();
+
+  if (p === '/usage') {
+    switchView('usage');
+  } else if (p === '/search') {
+    switchView('search');
+  } else if (p.startsWith('/events/')) {
+    const parts = p.replace(/^\/events\//, '').split('/');
+    const projectId = parts[0] || null;
+    const sessionId = parts[1] || null;
+    if (projectId) {
+      await selectProject(projectId);
+      if (sessionId) {
+        await selectSession(sessionId);
+      }
+    }
+  }
+  // default '/' — just loadProjects (already done)
+}
+
+// Handle back/forward
+window.addEventListener('popstate', () => {
+  navigating = true;
+  routeFromUrl().finally(() => { navigating = false; });
+});
+
 // --- Init ---
-loadProjects();
+navigating = true;
+routeFromUrl().finally(() => { navigating = false; });
 
 // Refresh project list every 30s
 setInterval(loadProjects, 30000);
